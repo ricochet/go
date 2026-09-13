@@ -452,6 +452,17 @@ func writeGlobalSec(ctxt *ld.Link) {
 	writeSecSize(ctxt, sizeOffset)
 }
 
+// exportsCabiRealloc reports whether the program exports a cabi_realloc
+// function with //go:wasmexport.
+func exportsCabiRealloc(ldr *loader.Loader) bool {
+	for _, s := range ldr.WasmExports {
+		if ldr.SymName(s) == "cabi_realloc" {
+			return true
+		}
+	}
+	return false
+}
+
 // writeExportSec writes the section that declares exports.
 // Exports can be accessed by the WebAssembly host, usually JavaScript.
 // The wasm_export_* functions and the linear memory get exported.
@@ -465,12 +476,15 @@ func writeExportSec(ctxt *ld.Link, ldr *loader.Loader, lenHostImports int) {
 		// its start function through the table exported under
 		// __indirect_function_table. An executable also exports
 		// cabi_realloc, through which the preview1 command adapter allocates
-		// before _start; c-shared modules get cabi_realloc from their
-		// bindings, and the reactor adapter only calls it after _initialize.
-		// A GOOS=wasip3 executable lowers lists (e.g. its arguments) from the
-		// host, which calls cabi_realloc.
+		// before _start; GOOS=wasip1 c-shared modules get cabi_realloc from
+		// their bindings, and the reactor adapter only calls it after
+		// _initialize. A GOOS=wasip3 module lowers lists (e.g. its arguments
+		// or directory entries) from the host, which calls cabi_realloc, so
+		// it gets the runtime's unless it exports one itself (as Component
+		// Model bindings do).
 		coopTable := buildcfg.Experiment.WasmCoopThreads
-		coopRealloc := (coopTable || buildcfg.GOOS == "wasip3") && ctxt.BuildMode == ld.BuildModeExe
+		coopRealloc := (coopTable && ctxt.BuildMode == ld.BuildModeExe) ||
+			(buildcfg.GOOS == "wasip3" && !exportsCabiRealloc(ldr))
 		if coopTable {
 			numExports++
 		}
