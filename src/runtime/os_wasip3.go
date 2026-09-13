@@ -501,6 +501,35 @@ func net_wasip3SubtaskDrop(subtask uint32) {
 	p3SubtaskDrop(subtask)
 }
 
+// Hooks for package net/http, which sends requests with wasi:http.
+
+//go:linkname http_wasip3CabiHold net/http.wasip3CabiHold
+//go:nosplit
+func http_wasip3CabiHold() {
+	syscall_wasip3CabiHold()
+}
+
+//go:linkname http_wasip3CabiRelease net/http.wasip3CabiRelease
+//go:nosplit
+func http_wasip3CabiRelease() {
+	syscall_wasip3CabiRelease()
+}
+
+//go:linkname http_wasip3Await net/http.wasip3Await
+func http_wasip3Await(h uint32, interrupted *bool) (event, payload uint32) {
+	return p3AwaitInterruptible(h, interrupted)
+}
+
+//go:linkname http_wasip3Interrupt net/http.wasip3Interrupt
+func http_wasip3Interrupt(h uint32) {
+	p3Interrupt(h)
+}
+
+//go:linkname http_wasip3SubtaskDrop net/http.wasip3SubtaskDrop
+func http_wasip3SubtaskDrop(subtask uint32) {
+	p3SubtaskDrop(subtask)
+}
+
 //go:linkname syscall_wasip3CabiRelease syscall.wasip3CabiRelease
 //go:nosplit
 func syscall_wasip3CabiRelease() {

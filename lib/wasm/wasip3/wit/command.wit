@@ -5,8 +5,11 @@
 //	wasm-tools component new main.embed.wasm -o main.component.wasm
 //
 // The WASI packages in deps are those of Wasmtime's WASI 0.3 implementation.
+// A component only imports the interfaces that its module uses: package
+// net/http uses wasi:http/client.
 package go:wasip3;
 
 world command {
   include wasi:cli/command@0.3.0;
+  import wasi:http/client@0.3.0;
 }

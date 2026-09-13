@@ -145,6 +145,35 @@ func p3Await(h uint32) (event, payload uint32) {
 	return event, payload
 }
 
+// p3AwaitInterruptible is p3Await, except that it returns p3EventNone
+// without waiting if *interrupted is set, or once p3Interrupt(h) is called.
+// A goroutine interrupting it sets *interrupted before calling p3Interrupt,
+// so the interruption isn't lost if it comes before the wait starts.
+func p3AwaitInterruptible(h uint32, interrupted *bool) (event, payload uint32) {
+	if *interrupted {
+		return p3EventNone, 0
+	}
+	return p3Await(h)
+}
+
+// p3Interrupt wakes the goroutine waiting in p3Await for waitable h, unless
+// h's event has already been delivered to it, leaving h in no waitable set.
+func p3Interrupt(h uint32) {
+	if int(h) >= p3Poll.numWaiters {
+		return
+	}
+	w := &p3Waiters()[h]
+	if w.handle != h || w.gp == 0 {
+		return
+	}
+	p3WaitableJoin(h, 0)
+	w.event, w.payload = p3EventNone, 0
+	gp := w.gp.ptr()
+	w.gp = 0
+	netpollAdjustWaiters(-1)
+	goready(gp, 0)
+}
+
 // p3AwaitCall parks the calling goroutine until the async-lowered import
 // call that returned status has returned.
 func p3AwaitCall(status uint32) {
