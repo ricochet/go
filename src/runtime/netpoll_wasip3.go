@@ -374,16 +374,32 @@ const (
 )
 
 // wasip3PollIdle is called by a task when no goroutine can run, with whether
-// the task's export has produced its result. It makes sure a timer subtask in
-// the current waitable set completes when the next goroutine timer is due,
-// and reports what the task should do. The task is done once its export has
-// produced its result and nothing else is waiting in the set; until then, its
-// notification (see task_wasip3.go) lets the runtime wake it up.
+// the task's export has produced its result. It makes sure a timer subtask
+// completes when the next goroutine timer is due, and reports what the task
+// should do. The task is done once its export has produced its result and
+// nothing else is waiting in its set; until then, its notification (see
+// task_wasip3.go) lets the runtime wake it up.
+//
+// Timers of goroutines may belong to any task. A task that is still working
+// on its result arms a timer subtask in its own set. A task that has produced
+// its result leaves that to a task that is still working, if there is one, so
+// that it doesn't stay for the timers of others: under a steady load, some
+// goroutine always has a timer.
 //
 //go:linkname wasip3PollIdle
 func wasip3PollIdle(returned bool) int {
-	if idleTimer >= 0 && p3ArmTimer(idleTimer) {
-		return p3IdleYield
+	t := p3FindTask(p3Tasks.cur)
+	if t != nil && returned {
+		t.returned = true
+	}
+	if idleTimer >= 0 {
+		if returned && p3HandOffTimer(idleTimer) {
+			if t != nil {
+				p3CancelTimers(t.set)
+			}
+		} else if p3ArmTimer(idleTimer) {
+			return p3IdleYield
+		}
 	}
 	if !returned {
 		return p3IdleWait
@@ -397,3 +413,49 @@ func wasip3PollIdle(returned bool) int {
 	p3TaskExit()
 	return p3IdleDone
 }
+
+// p3HandOffTimer makes sure that a task other than the running one, which
+// hasn't produced its export's result yet, has a timer subtask that completes
+// within delay nanoseconds: it has one already, or it is notified, and arms
+// one when it is idle. It reports whether there is such a task.
+func p3HandOffTimer(delay int64) bool {
+	when := nanotime() + delay
+	var working *p3Task
+	for i := range p3Tasks.tasks {
+		t := &p3Tasks.tasks[i]
+		if t.id == p3Tasks.cur || t.returned {
+			continue
+		}
+		for j := range p3Waiters() {
+			if w := &p3Waiters()[j]; w.handle != 0 && w.timer && w.set == t.set && w.when <= when {
+				return true
+			}
+		}
+		if working == nil {
+			working = t
+		}
+	}
+	if working == nil {
+		return false
+	}
+	p3TaskNotify(working)
+	return true
+}
+
+// p3CancelTimers cancels the timer subtasks in waitable set set.
+func p3CancelTimers(set uint32) {
+	for i := range p3Waiters() {
+		w := &p3Waiters()[i]
+		if w.handle == 0 || !w.timer || w.set != set {
+			continue
+		}
+		p3WaitableJoin(w.handle, 0)
+		p3SubtaskCancel(w.handle)
+		p3SubtaskDrop(w.handle)
+		*w = p3Waiter{}
+		p3Poll.timers--
+	}
+}
+
+//go:wasmimport $root [subtask-cancel]
+func p3SubtaskCancel(subtask uint32) uint32
