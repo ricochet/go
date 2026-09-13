@@ -23,6 +23,10 @@ import (
 // (see p3Await), and when no goroutine is runnable the scheduler waits for
 // any stream event or timer in netpoll.
 //
+// By default, goroutines run on Component Model threads
+// (GOEXPERIMENT=wasmcoopthreads, see coop_wasip1.go), with the experiments
+// that build on them; GOEXPERIMENT=nowasmcoopthreads turns them all off.
+//
 // This is a prototype covering stdio, files, sockets, clocks, sleeping,
 // arguments, the environment, random numbers and exiting. The syscall package
 // implements files on wasi:filesystem, waiting for its import calls and

@@ -87,6 +87,18 @@ func ParseGOEXPERIMENT(goos, goarch, goexp string) (*ExperimentFlags, error) {
 		JSONv2:               true,
 		MapSplitGroup:        true,
 	}
+	if goos == "wasip3" && goarch == "wasm" {
+		// On wasip3, goroutines run on Component Model threads, so wasm
+		// functions need not be resumable, and use the register ABI with
+		// SP as a wasm parameter. GOEXPERIMENT=nowasmcoopthreads turns all
+		// of that off.
+		baseline.WasmCoopThreads = true
+		baseline.WasmStackful = true
+		baseline.WasmSPParam = true
+		baseline.WasmRegABI = true
+		baseline.RegabiWrappers = true
+		baseline.RegabiArgs = true
+	}
 	flags := &ExperimentFlags{
 		Flags:    baseline,
 		baseline: baseline,
@@ -141,6 +153,12 @@ func ParseGOEXPERIMENT(goos, goarch, goexp string) (*ExperimentFlags, error) {
 	if regabiAlwaysOn {
 		flags.RegabiWrappers = true
 		flags.RegabiArgs = true
+	}
+	if goarch == "wasm" {
+		// Each wasm experiment builds on the previous one.
+		flags.WasmStackful = flags.WasmStackful && flags.WasmCoopThreads
+		flags.WasmSPParam = flags.WasmSPParam && flags.WasmStackful
+		flags.WasmRegABI = flags.WasmRegABI && flags.WasmSPParam
 	}
 	// On wasip1, GOEXPERIMENT=wasmregabi (which builds on wasmcoopthreads,
 	// wasmstackful and wasmspparam) turns on the register ABI.

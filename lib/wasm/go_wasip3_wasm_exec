@@ -14,8 +14,9 @@ wasm-tools component new "$1.embed.wasm" -o "$1.component.wasm"
 
 case "$GOWASIRUNTIME" in
 	"wasmtime" | "")
-		# Component Model threading is needed with GOEXPERIMENT=wasmcoopthreads,
-		# where goroutines also keep their frames on the wasm stack.
+		# Goroutines run on Component Model threads (unless
+		# GOEXPERIMENT=nowasmcoopthreads), keeping their frames on the wasm
+		# stack.
 		exec wasmtime run -S p3 -S inherit-network -S allow-ip-name-lookup \
 			--dir=/ --env PWD="$PWD" --env PATH="$PATH" \
 			-W component-model-async,component-model-async-stackful,component-model-threading \
