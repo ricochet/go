@@ -482,8 +482,8 @@ type g struct {
 
 	_panic    *_panic // innermost panic
 	_defer    *_defer // innermost defer
-	m         *m      // current m
-	sched     gobuf
+	m         *m      // current m; offset known to cmd/internal/obj/wasm
+	sched     gobuf   // offset known to cmd/internal/obj/wasm
 	syscallsp uintptr // if status==Gsyscall, syscallsp = sched.sp to use during gc
 	syscallpc uintptr // if status==Gsyscall, syscallpc = sched.pc to use during gc
 	syscallbp uintptr // if status==Gsyscall, syscallbp = sched.bp to use in fpTraceback

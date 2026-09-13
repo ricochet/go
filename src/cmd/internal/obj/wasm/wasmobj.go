@@ -1244,6 +1244,44 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 		p = coopAddActive(p, appendp, active, 1)
 	}
 
+	onSystemStack := reallocOnSystemStack(s)
+	savedG, savedSP, g0 := reallocScratchRegs(s)
+	if onSystemStack {
+		// Unless it's already there, switch to the system stack (the g0
+		// stack) as runtime·systemstack does, saving g and SP in locals.
+		p = appendp(p, AGet, regAddr(REGG))
+		p = appendp(p, ASet, regAddr(savedG))
+		p = appendp(p, AGet, regAddr(REG_SP))
+		p = appendp(p, AI64ExtendI32U)
+		p = appendp(p, ASet, regAddr(savedSP))
+		// g0 = g.m.g0
+		p = appendp(p, AGet, regAddr(REGG))
+		p = appendp(p, AI32WrapI64)
+		p = appendp(p, AI64Load, constAddr(6*8)) // G.m
+		p = appendp(p, AI32WrapI64)
+		p = appendp(p, AI64Load, constAddr(0)) // M.g0
+		p = appendp(p, ASet, regAddr(g0))
+		// if g != g0 && g0.sched.sp != 0
+		p = appendp(p, AGet, regAddr(g0))
+		p = appendp(p, AGet, regAddr(REGG))
+		p = appendp(p, AI64Ne)
+		p = appendp(p, AGet, regAddr(g0))
+		p = appendp(p, AI32WrapI64)
+		p = appendp(p, AI64Load, constAddr(7*8)) // G.sched.sp
+		p = appendp(p, AI64Const, constAddr(0))
+		p = appendp(p, AI64Ne)
+		p = appendp(p, AI32And)
+		p = appendp(p, AIf)
+		p = appendp(p, AGet, regAddr(g0))
+		p = appendp(p, ASet, regAddr(REGG))
+		p = appendp(p, AGet, regAddr(g0))
+		p = appendp(p, AI32WrapI64)
+		p = appendp(p, AI64Load, constAddr(7*8)) // G.sched.sp
+		p = appendp(p, AI32WrapI64)
+		p = appendp(p, ASet, regAddr(REG_SP))
+		p = appendp(p, AEnd)
+	}
+
 	// Now that we've checked the SP, generate the prologue
 	if framesize > 0 {
 		p = appendp(p, AGet, regAddr(REG_SP))
@@ -1372,7 +1410,35 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 		p = appendp(p, AI64Store, constAddr(0))
 		p = appendp(p, AEnd)
 	}
+	if onSystemStack {
+		p = appendp(p, AGet, regAddr(savedG))
+		p = appendp(p, ASet, regAddr(REGG))
+		p = appendp(p, AGet, regAddr(savedSP))
+		p = appendp(p, AI32WrapI64)
+		p = appendp(p, ASet, regAddr(REG_SP))
+	}
 	p = appendp(p, AReturn)
+}
+
+// reallocOnSystemStack reports whether s, a wasmexport wrapper, runs the
+// exported function on the system stack: cabi_realloc, with
+// GOEXPERIMENT=wasmstackful or on wasip3. The host calls cabi_realloc while
+// it lowers values into linear memory, typically in the middle of an import
+// call made by a goroutine. The goroutine's stack must not move meanwhile:
+// the import's caller keeps SP (with wasmstackful, in a local), and may have
+// passed pointers into the stack to the import. On the system stack, the
+// function can't grow the goroutine's stack, and allocating doesn't start
+// garbage collections or assists, which may park or call imports.
+func reallocOnSystemStack(s *obj.LSym) bool {
+	return strings.HasPrefix(s.Name, "cabi_realloc") && (stackful() || buildcfg.GOOS == "wasip3")
+}
+
+// reallocScratchRegs returns the registers that the wrapper of s saves g and
+// SP in, and holds g0 in, while it runs on the system stack: the i64 locals
+// after its parameters (see assemble).
+func reallocScratchRegs(s *obj.LSym) (savedG, savedSP, g0 int16) {
+	base := int16(REG_R0 + len(s.Func().WasmExport.Params))
+	return base, base + 1, base + 2
 }
 
 // noReturn reports whether the call p is immediately followed by an
@@ -1533,6 +1599,11 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		if s.Func().WasmExport != nil {
 			// no local SP, not following Go calling convention
 			useAssemblyRegMap()
+			if reallocOnSystemStack(s) {
+				// The parameters are locals 0 to n-1 (R0 to Rn-1),
+				// followed by scratch locals (see reallocScratchRegs).
+				varDecls = []*varDecl{{count: 3, typ: i64}}
+			}
 			break
 		}
 
