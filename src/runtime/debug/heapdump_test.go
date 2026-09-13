@@ -15,6 +15,10 @@ func TestWriteHeapDumpNonempty(t *testing.T) {
 	if runtime.GOOS == "js" {
 		t.Skipf("WriteHeapDump is not available on %s.", runtime.GOOS)
 	}
+	if runtime.GOOS == "wasip3" {
+		// The runtime only writes to standard output and error.
+		t.Skipf("WriteHeapDump cannot write to files on %s.", runtime.GOOS)
+	}
 	f, err := os.CreateTemp("", "heapdumptest")
 	if err != nil {
 		t.Fatalf("TempFile failed: %v", err)

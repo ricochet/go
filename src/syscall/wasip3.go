@@ -16,11 +16,19 @@ import "unsafe"
 // WASI 0.3 interfaces. Package net implements sockets on wasi:sockets itself,
 // so the socket functions here fail.
 
-// Implemented in the runtime.
+// Implemented in the runtime, which copies buffers rather than retaining them.
+
+//go:noescape
 func wasip3Write(fd int32, p unsafe.Pointer, n int32) (written int32, broken bool)
+
+//go:noescape
 func wasip3Read(p unsafe.Pointer, n int32) int32
+
 func wasip3ClockTime(realtime bool) uint64
+
+//go:noescape
 func wasip3Random(r []byte)
+
 func wasip3Exit(code int32)
 
 func ProcExit(code int32) {
