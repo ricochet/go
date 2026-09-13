@@ -60,6 +60,11 @@ var p3Poll struct {
 	// set is the current waitable set, or 0 until one is needed.
 	set uint32
 
+	// ownSet is the set that the runtime uses outside tasks, or 0 until one
+	// is needed. A task's set is dropped when the task exits, after which
+	// set is 0 again.
+	ownSet uint32
+
 	// waiters is an array of p3Waiter indexed by waitable handle. It is not
 	// in the heap, and its address is a uintptr, so that netpoll, which runs
 	// without write barriers, can grow it.
@@ -103,7 +108,10 @@ func p3Waiters() []p3Waiter {
 
 func p3PollSet() uint32 {
 	if p3Poll.set == 0 {
-		p3Poll.set = p3WaitableSetNew()
+		if p3Poll.ownSet == 0 {
+			p3Poll.ownSet = p3WaitableSetNew()
+		}
+		p3Poll.set = p3Poll.ownSet
 	}
 	return p3Poll.set
 }

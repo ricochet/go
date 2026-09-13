@@ -166,6 +166,10 @@ func p3TaskExit() {
 		p3TaskFutureCancelRead(t.notifyReadable)
 		p3TaskFutureDropReadable(t.notifyReadable)
 		p3TaskFutureDropWritable(t.notifyWritable)
+		// The task's set is dropped once it exits (by the task's callback).
+		if p3Poll.set == t.set {
+			p3Poll.set = 0
+		}
 		p3Tasks.tasks = append(p3Tasks.tasks[:i], p3Tasks.tasks[i+1:]...)
 		break
 	}
