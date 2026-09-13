@@ -15,7 +15,7 @@ import (
 
 // TestFchmodAtSymlinkNofollow verifies that Fchmodat honors the AT_SYMLINK_NOFOLLOW flag.
 func TestFchmodatSymlinkNofollow(t *testing.T) {
-	if runtime.GOOS == "wasip1" {
+	if runtime.GOOS == "wasip1" || runtime.GOOS == "wasip3" {
 		t.Skip("wasip1 doesn't support chmod")
 	}
 

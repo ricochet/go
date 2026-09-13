@@ -233,4 +233,3 @@ const coopDebug = false
 func coopResumeLost() {
 	print("coop: no frame resumed pc=", hex(coopResumePC), " sp=", hex(coopResumeSP), " g", getg().goid, " depth=", hex(getg().stack.hi-coopResumeSP), "\n")
 }
-

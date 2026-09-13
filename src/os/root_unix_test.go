@@ -16,7 +16,7 @@ import (
 )
 
 func TestRootChown(t *testing.T) {
-	if runtime.GOOS == "wasip1" {
+	if runtime.GOOS == "wasip1" || runtime.GOOS == "wasip3" {
 		t.Skip("Chown not supported on " + runtime.GOOS)
 	}
 
@@ -52,7 +52,7 @@ func TestRootChown(t *testing.T) {
 }
 
 func TestRootLchown(t *testing.T) {
-	if runtime.GOOS == "wasip1" {
+	if runtime.GOOS == "wasip1" || runtime.GOOS == "wasip3" {
 		t.Skip("Lchown not supported on " + runtime.GOOS)
 	}
 
@@ -91,7 +91,7 @@ func TestRootLchown(t *testing.T) {
 }
 
 func TestRootConsistencyChown(t *testing.T) {
-	if runtime.GOOS == "wasip1" {
+	if runtime.GOOS == "wasip1" || runtime.GOOS == "wasip3" {
 		t.Skip("Chown not supported on " + runtime.GOOS)
 	}
 	groups, err := os.Getgroups()
@@ -127,7 +127,7 @@ func TestRootConsistencyChown(t *testing.T) {
 }
 
 func TestRootConsistencyLchown(t *testing.T) {
-	if runtime.GOOS == "wasip1" {
+	if runtime.GOOS == "wasip1" || runtime.GOOS == "wasip3" {
 		t.Skip("Lchown not supported on " + runtime.GOOS)
 	}
 	groups, err := os.Getgroups()

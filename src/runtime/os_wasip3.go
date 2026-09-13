@@ -23,9 +23,11 @@ import (
 // (see p3Await), and when no goroutine is runnable the scheduler waits for
 // any stream event or timer in netpoll.
 //
-// This is a prototype covering stdio, clocks, sleeping, arguments, the
-// environment, random numbers and exiting. Other WASI preview 1 functions
-// report ENOSYS.
+// This is a prototype covering stdio, files, clocks, sleeping, arguments, the
+// environment, random numbers and exiting. The syscall package implements
+// files on wasi:filesystem, waiting for its import calls and streams with
+// syscall_wasip3AwaitCall and syscall_wasip3Await. Other WASI preview 1
+// functions report ENOSYS.
 
 // Canonical ABI return codes of stream and future operations.
 const (
@@ -401,4 +403,62 @@ func syscall_wasip3Random(r []byte) {
 //go:linkname syscall_wasip3Exit syscall.wasip3Exit
 func syscall_wasip3Exit(code int32) {
 	exit(code)
+}
+
+// syscall_wasip3Await parks the calling goroutine until an event on waitable h
+// (a stream or future end), and returns the event code and payload.
+//
+//go:linkname syscall_wasip3Await syscall.wasip3Await
+func syscall_wasip3Await(h uint32) (event, payload uint32) {
+	return p3Await(h)
+}
+
+// syscall_wasip3AwaitCall parks the calling goroutine until the async-lowered
+// import call that returned status has returned.
+//
+//go:linkname syscall_wasip3AwaitCall syscall.wasip3AwaitCall
+func syscall_wasip3AwaitCall(status uint32) {
+	if status&0xf == p3SubtaskReturned {
+		return
+	}
+	subtask := status >> 4
+	for {
+		if _, state := p3Await(subtask); state == p3SubtaskReturned {
+			break
+		}
+	}
+	p3SubtaskDrop(subtask)
+}
+
+// Memory that the host allocates with cabi_realloc to pass strings and lists
+// to the syscall package is only needed until the syscall package has copied
+// them out. The syscall package holds the allocator around every import call
+// that may allocate, and when no call holds it any longer, the allocator
+// rewinds to where it was when the first of them started.
+//
+// This relies on nothing else keeping memory from cabi_realloc, which holds for
+// executables, where the runtime is the only user.
+var p3Cabi struct {
+	holds     int32
+	next, end uintptr
+}
+
+//go:linkname syscall_wasip3CabiHold syscall.wasip3CabiHold
+//go:nosplit
+func syscall_wasip3CabiHold() {
+	if p3Cabi.holds == 0 {
+		p3Cabi.next, p3Cabi.end = cabiNext, cabiEnd
+	}
+	p3Cabi.holds++
+}
+
+//go:linkname syscall_wasip3CabiRelease syscall.wasip3CabiRelease
+//go:nosplit
+func syscall_wasip3CabiRelease() {
+	p3Cabi.holds--
+	if p3Cabi.holds == 0 {
+		// If the allocator moved on to a new chunk meanwhile, the new chunk
+		// is abandoned.
+		cabiNext, cabiEnd = p3Cabi.next, p3Cabi.end
+	}
 }

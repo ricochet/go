@@ -515,7 +515,7 @@ func TestTraceStacks(t *testing.T) {
 
 func TestTraceStress(t *testing.T) {
 	switch runtime.GOOS {
-	case "js", "wasip1":
+	case "js", "wasip1", "wasip3":
 		t.Skip("no os.Pipe on " + runtime.GOOS)
 	}
 	testTraceProg(t, "stress.go", checkReaderDeterminism)
@@ -523,7 +523,7 @@ func TestTraceStress(t *testing.T) {
 
 func TestTraceStressStartStop(t *testing.T) {
 	switch runtime.GOOS {
-	case "js", "wasip1":
+	case "js", "wasip1", "wasip3":
 		t.Skip("no os.Pipe on " + runtime.GOOS)
 	}
 	testTraceProg(t, "stress-start-stop.go", nil)

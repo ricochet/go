@@ -134,8 +134,9 @@ func netpoll(delay int64) (gList, int32) {
 	}
 	for code != p3EventNone {
 		h, payload := event[0], event[1]
-		if code == p3EventSubtask {
-			if payload == p3SubtaskReturned {
+		if !p3Deliver(&toRun, h, code, payload) {
+			// Only timers are joined to the set without a waiter.
+			if code == p3EventSubtask && payload == p3SubtaskReturned {
 				p3WaitableJoin(h, 0)
 				p3SubtaskDrop(h)
 				p3Poll.timers--
@@ -144,20 +145,26 @@ func netpoll(delay int64) (gList, int32) {
 				}
 			}
 		} else {
-			for i := range p3Poll.waiters {
-				w := &p3Poll.waiters[i]
-				if w.handle != h || w.gp == 0 {
-					continue
-				}
-				p3WaitableJoin(h, 0)
-				w.event, w.payload = code, payload
-				toRun.push(w.gp.ptr())
-				w.gp = 0
-				delta--
-				break
-			}
+			delta--
 		}
 		code = p3WaitableSetPoll(p3PollSet(), &event)
 	}
 	return toRun, delta
+}
+
+// p3Deliver hands an event on waitable h to the goroutine waiting for it, if
+// any, and reports whether there was one.
+func p3Deliver(toRun *gList, h, code, payload uint32) bool {
+	for i := range p3Poll.waiters {
+		w := &p3Poll.waiters[i]
+		if w.handle != h || w.gp == 0 {
+			continue
+		}
+		p3WaitableJoin(h, 0)
+		w.event, w.payload = code, payload
+		toRun.push(w.gp.ptr())
+		w.gp = 0
+		return true
+	}
+	return false
 }
