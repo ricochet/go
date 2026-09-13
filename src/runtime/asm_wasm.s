@@ -101,18 +101,25 @@ TEXT runtime·gogo(SB), NOSPLIT, $16-8
 	I64Eqz
 	Not
 	If
+		// R6 = this thread's index, kept across the switch.
+		MOVD $runtime·coopSwitchFrom(SB), R6
+		I64Load32U 0(R6)
+		Set R6
 		MOVD R1, 0(SP)
 		CALLNORESUME runtime·coopThreadSuspendThenResume(SB)
 #ifdef WASM_STACKFUL
-		// Resumed only to exit (see coopRetireThread): throw out to
-		// wasmCoopThreadStart without applying any gobuf.
-		MOVD $runtime·coopRetire(SB), R0
-		I64Load 0(R0)
-		I64Eqz
-		Not
+		// A goroutine switch to this thread makes it the current one.
+		// Otherwise the host resumed it to exit (see coopRetireThread):
+		// throw out to wasmCoopThreadStart without applying any gobuf, and
+		// without writing the SP global, which belongs to the thread that
+		// runs Go.
+		MOVD $runtime·coopCurThread(SB), R0
+		I64Load32U 0(R0)
+		Get R6
+		I64Ne
 		If
-			MOVD $0, runtime·coopRetire(SB)
-			Throw $0
+			MOVD $0, runtime·coopResumePC(SB)
+			Throw $1 // coopResumeKeepSP
 		End
 #endif
 	End
@@ -150,24 +157,6 @@ TEXT runtime·gogo(SB), NOSPLIT, $0-8
 
 	I32Const $1
 	Return
-
-#ifdef WASM_COOP_THREADS
-// func coopRetireSwitch(thread uint32)
-// Yields to thread so that it exits (see coopRetireThread). That thread
-// resumes inside its own import wrapper, whose epilogue adjusts the SP global
-// before the thread exits, so restore SP afterwards.
-TEXT runtime·coopRetireSwitch(SB), NOSPLIT, $8-4
-	Get SP
-	I64ExtendI32U
-	Set R5 // not R0-R2, which calls clobber with GOEXPERIMENT=wasmregabi
-	MOVW thread+0(FP), R0
-	MOVD R0, 0(SP)
-	CALLNORESUME runtime·coopThreadYieldThenResume(SB)
-	Get R5
-	I32WrapI64
-	Set SP
-	RET
-#endif
 
 #ifdef WASM_STACKFUL
 // func mcall(fn func(*g))

@@ -371,14 +371,39 @@ func walltime() (sec int64, nsec int32) {
 	return walltime1()
 }
 
+// While p3Clocks.paused is set, the clocks report the last time they read,
+// without calling imports.
+var p3Clocks struct {
+	paused bool
+	mono   int64
+	sec    int64
+	nsec   int32
+}
+
 func walltime1() (sec int64, nsec int32) {
-	var now p3Instant
-	p3SystemNow(&now)
-	return now.seconds, int32(now.nanoseconds)
+	if !p3Clocks.paused {
+		var now p3Instant
+		p3SystemNow(&now)
+		p3Clocks.sec, p3Clocks.nsec = now.seconds, int32(now.nanoseconds)
+	}
+	return p3Clocks.sec, p3Clocks.nsec
 }
 
 func nanotime1() int64 {
-	return int64(p3MonotonicNow())
+	if !p3Clocks.paused {
+		p3Clocks.mono = int64(p3MonotonicNow())
+	}
+	return p3Clocks.mono
+}
+
+// wasip3PauseClocks sets whether the clocks are paused. The host doesn't let
+// a component call imports from cabi_realloc, so Component Model bindings
+// whose cabi_realloc allocates Go memory pause the clocks, which the garbage
+// collector reads, while it runs.
+//
+//go:linkname wasip3PauseClocks
+func wasip3PauseClocks(paused bool) {
+	p3Clocks.paused = paused
 }
 
 // syscall_wasip3ClockTime implements clock_time_get for the syscall package.
@@ -419,16 +444,7 @@ func syscall_wasip3Await(h uint32) (event, payload uint32) {
 //
 //go:linkname syscall_wasip3AwaitCall syscall.wasip3AwaitCall
 func syscall_wasip3AwaitCall(status uint32) {
-	if status&0xf == p3SubtaskReturned {
-		return
-	}
-	subtask := status >> 4
-	for {
-		if _, state := p3Await(subtask); state == p3SubtaskReturned {
-			break
-		}
-	}
-	p3SubtaskDrop(subtask)
+	p3AwaitCall(status)
 }
 
 // Memory that the host allocates with cabi_realloc to pass strings and lists

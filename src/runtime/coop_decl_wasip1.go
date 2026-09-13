@@ -10,6 +10,5 @@ package runtime
 // GOEXPERIMENT=wasmcoopthreads (see coop_wasip1.go), so that vet's asmdecl
 // check, which does not evaluate #ifdef, finds them.
 
-func coopRetireSwitch(thread uint32)
 func wasmCoopThreadStart()
 func wasmCoopStartMain()

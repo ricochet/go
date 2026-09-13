@@ -158,6 +158,7 @@ var (
 	coopExportEnter       *obj.LSym
 	coopMainStarted       *obj.LSym
 	coopStartMain         *obj.LSym
+	goexit                *obj.LSym
 )
 
 // stackful reports whether GOEXPERIMENT=wasmstackful is in effect: calls are
@@ -216,6 +217,11 @@ var spFree = map[string]bool{
 // (GOEXPERIMENT=wasmstackful). The linker defines it as the only tag.
 const coopResumeTag = 0
 
+// In assembly, "Throw $coopResumeKeepSP" throws coopResumeTag without writing
+// the SP global (GOEXPERIMENT=wasmspparam), for a thread that exits without
+// resuming a goroutine, while the SP global belongs to another thread.
+const coopResumeKeepSP = 1
+
 // panicStart is (*_panic).start, whose return runtime·recovery resumes when a
 // recovered panic would skip a pending Goexit.
 const panicStart = "runtime.(*_panic).start"
@@ -259,6 +265,7 @@ func instinit(ctxt *obj.Link) {
 		coopExportEnter = ctxt.LookupABI("runtime.wasmCoopExportEnter", obj.ABIInternal)
 		coopMainStarted = ctxt.Lookup("runtime.coopMainStarted")
 		coopStartMain = ctxt.Lookup("runtime.wasmCoopStartMain")
+		goexit = ctxt.LookupABI("runtime.goexit", obj.ABI0)
 	}
 }
 
@@ -1208,6 +1215,13 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 		p = appendp(p, ACall, obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: coopStartMain})
 		p = appendp(p, AEnd)
 		p = appendp(p, ACALLNORESUME, obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: coopExportEnter})
+		// Such a call has no Go caller: the frames of runtime.main were
+		// discarded when it paused, so the slot above this frame holds
+		// no return address. Store one of runtime.goexit, a top frame,
+		// so that tracebacks of the goroutine stop at this frame.
+		p = appendp(p, AGet, regAddr(REG_SP))
+		p = appendp(p, AI64Const, obj.Addr{Type: obj.TYPE_ADDR, Name: obj.NAME_EXTERN, Sym: goexit, Offset: 1})
+		p = appendp(p, AI64Store, constAddr(0))
 		p = appendp(p, AEnd)
 		p = coopAddActive(p, appendp, active, 1)
 	}
@@ -1265,6 +1279,10 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 	if framesize == 0 {
 		// Frameless function, no prologue.
 		retAddr.Offset = 0
+	} else if coopEntry {
+		// The call of coopStartMain above starts another block, so the
+		// prologue is in PC_B=2.
+		retAddr.Offset = 2
 	}
 	p = appendp(p, AI64Const, retAddr)
 	p = appendp(p, AI64Store, constAddr(0))
@@ -1717,7 +1735,7 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 				}
 
 			case AThrow:
-				if p.Mark&rethrow == 0 {
+				if p.Mark&rethrow == 0 && p.From.Offset != coopResumeKeepSP {
 					syncGlobalSP()
 				}
 			}
@@ -1809,7 +1827,11 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 
 		case AThrow:
 			w.WriteByte(0x08) // throw
-			writeUleb128(w, uint64(p.From.Offset))
+			tag := uint64(p.From.Offset)
+			if tag == coopResumeKeepSP {
+				tag = coopResumeTag
+			}
+			writeUleb128(w, tag)
 			continue
 
 		case obj.ANOP, obj.ATEXT, obj.AFUNCDATA, obj.APCDATA:

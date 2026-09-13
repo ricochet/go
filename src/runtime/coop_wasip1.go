@@ -50,8 +50,8 @@ func coopThreadNewIndirect(fi uint32, arg uint32) uint32
 //go:wasmimport $root [thread-suspend-then-resume]
 func coopThreadSuspendThenResume(thread uint32) uint32
 
-//go:wasmimport $root [thread-yield-then-resume]
-func coopThreadYieldThenResume(thread uint32) uint32
+//go:wasmimport $root [thread-resume-later]
+func coopThreadResumeLater(thread uint32)
 
 // wasmCoopThreadStart is the thread start function (defined in
 // rt0_wasip1_wasm.s). Its table index is passed to thread.new-indirect.
@@ -60,6 +60,11 @@ func wasmCoopThreadStart()
 var (
 	// coopCurThread is the index of the thread currently running Go code.
 	coopCurThread uint32
+
+	// coopSwitchFrom is the index of the thread that wasmCoopPrepare last
+	// switched away from. gogo keeps it across the switch to recognize
+	// whether it was resumed to run a goroutine (see coopRetireThread).
+	coopSwitchFrom uint32
 
 	// coopBuf is the *gobuf that the next thread to run Go code must apply.
 	// It is a uintptr so that writing it needs no write barrier.
@@ -104,10 +109,6 @@ var (
 	// g that owns it), and coopCurEpoch is the epoch of the running thread.
 	coopCurEpoch   uint32
 	coopEpochCount uint32
-
-	// coopRetire tells the thread being resumed to exit instead of running
-	// a goroutine (see coopRetireThread).
-	coopRetire uintptr
 )
 
 // coopNewproc gives a new goroutine a thread in the task of the goroutine
@@ -137,6 +138,14 @@ func coopNewproc(gp *g) {
 
 // coopRetireThread makes the thread of an exited goroutine, which is
 // suspended in gogo, exit.
+//
+// It doesn't switch to the thread, which would have to yield this thread to
+// the host so that the host resumes it after the other thread exits. While
+// this thread yields, the host may start another export call, but Go is not
+// at a point where it can take one. Instead, the thread becomes ready and
+// runs whenever the host next runs threads. gogo on that thread then finds
+// that no goroutine switch resumed it (coopCurThread is another thread), and
+// throws out to wasmCoopThreadStart, which returns.
 func coopRetireThread(t uint32) {
 	if !goexperiment.WasmStackful {
 		throw("coop: retiring threads requires GOEXPERIMENT=wasmstackful")
@@ -144,15 +153,8 @@ func coopRetireThread(t uint32) {
 	if coopDebug {
 		print("coop: retire thread ", t, "\n")
 	}
-	coopRetire = 1
-	coopResumePC = 0
-	// The thread throws out of gogo to wasmCoopThreadStart, which returns.
-	// This thread stays ready, so the host resumes it afterwards.
-	coopRetireSwitch(t)
+	coopThreadResumeLater(t)
 }
-
-// coopRetireSwitch (asm_wasm.s) yields to thread and restores SP afterwards.
-func coopRetireSwitch(thread uint32)
 
 // wasmCoopStartMain (rt0_wasip1_wasm.s) runs runtime.main until it pauses.
 func wasmCoopStartMain()
@@ -219,6 +221,7 @@ func wasmCoopPrepare(buf *gobuf) uint32 {
 			print("coop: new thread ", t, " fi=", fi, " for g", gp.goid, "\n")
 		}
 	}
+	coopSwitchFrom = coopCurThread
 	coopCurThread = t
 	return t
 }
