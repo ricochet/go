@@ -24,7 +24,7 @@ func TestReadUnixgramWithUnnamedSocket(t *testing.T) {
 		t.Skip("unixgram test")
 	}
 	switch runtime.GOOS {
-	case "js", "wasip1":
+	case "js", "wasip1", "wasip3":
 		t.Skipf("skipping: syscall.Socket not implemented on %s", runtime.GOOS)
 	}
 	if runtime.GOOS == "openbsd" {
@@ -364,7 +364,7 @@ func TestUnixUnlink(t *testing.T) {
 		t.Skip("unix test")
 	}
 	switch runtime.GOOS {
-	case "js", "wasip1":
+	case "js", "wasip1", "wasip3":
 		t.Skipf("skipping: %s does not support Unlink", runtime.GOOS)
 	}
 

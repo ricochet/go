@@ -23,11 +23,12 @@ import (
 // (see p3Await), and when no goroutine is runnable the scheduler waits for
 // any stream event or timer in netpoll.
 //
-// This is a prototype covering stdio, files, clocks, sleeping, arguments, the
-// environment, random numbers and exiting. The syscall package implements
-// files on wasi:filesystem, waiting for its import calls and streams with
-// syscall_wasip3AwaitCall and syscall_wasip3Await. Other WASI preview 1
-// functions report ENOSYS.
+// This is a prototype covering stdio, files, sockets, clocks, sleeping,
+// arguments, the environment, random numbers and exiting. The syscall package
+// implements files on wasi:filesystem, waiting for its import calls and
+// streams with syscall_wasip3AwaitCall and syscall_wasip3Await. Package net
+// implements TCP and UDP on wasi:sockets, waiting in poll descriptors (see
+// netpoll_wasip3.go). Other WASI preview 1 functions report ENOSYS.
 
 // Canonical ABI return codes of stream and future operations.
 const (
@@ -450,6 +451,28 @@ func syscall_wasip3CabiHold() {
 		p3Cabi.next, p3Cabi.end = cabiNext, cabiEnd
 	}
 	p3Cabi.holds++
+}
+
+//go:linkname net_wasip3CabiHold net.wasip3CabiHold
+//go:nosplit
+func net_wasip3CabiHold() {
+	syscall_wasip3CabiHold()
+}
+
+//go:linkname net_wasip3CabiRelease net.wasip3CabiRelease
+//go:nosplit
+func net_wasip3CabiRelease() {
+	syscall_wasip3CabiRelease()
+}
+
+//go:linkname net_wasip3Await net.wasip3Await
+func net_wasip3Await(h uint32) (event, payload uint32) {
+	return p3Await(h)
+}
+
+//go:linkname net_wasip3SubtaskDrop net.wasip3SubtaskDrop
+func net_wasip3SubtaskDrop(subtask uint32) {
+	p3SubtaskDrop(subtask)
 }
 
 //go:linkname syscall_wasip3CabiRelease syscall.wasip3CabiRelease

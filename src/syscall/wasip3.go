@@ -13,7 +13,8 @@ import "unsafe"
 // implement those functions on top of WASI 0.3 (see runtime/os_wasip3.go):
 // stdin, stdout and stderr are Component Model streams, files use
 // wasi:filesystem, and the clocks, random numbers and exiting map directly to
-// WASI 0.3 interfaces. Socket functions fail.
+// WASI 0.3 interfaces. Package net implements sockets on wasi:sockets itself,
+// so the socket functions here fail.
 
 // Implemented in the runtime.
 func wasip3Write(fd int32, p unsafe.Pointer, n int32) (written int32, broken bool)

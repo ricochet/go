@@ -38,7 +38,7 @@ func testableNetwork(network string) bool {
 		return supportsUnixSocket()
 	case "unixpacket":
 		switch runtime.GOOS {
-		case "aix", "android", "darwin", "ios", "plan9", "windows":
+		case "aix", "android", "darwin", "ios", "plan9", "wasip3", "windows":
 			return false
 		}
 	}
@@ -148,7 +148,7 @@ func condFatalf(t *testing.T, network string, format string, args ...any) {
 	// A few APIs like File and Read/WriteMsg{UDP,IP} are not
 	// fully implemented yet on Plan 9 and Windows.
 	switch runtime.GOOS {
-	case "windows", "js", "wasip1":
+	case "windows", "js", "wasip1", "wasip3":
 		if network == "file+net" {
 			t.Logf(format, args...)
 			return

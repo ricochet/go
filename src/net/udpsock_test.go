@@ -489,7 +489,7 @@ func TestUDPReadTimeout(t *testing.T) {
 
 func TestAllocs(t *testing.T) {
 	switch runtime.GOOS {
-	case "plan9", "js", "wasip1":
+	case "plan9", "js", "wasip1", "wasip3":
 		// These implementations have not been optimized.
 		t.Skipf("skipping on %v", runtime.GOOS)
 	case "windows":
@@ -679,11 +679,12 @@ func TestIPv6WriteMsgUDPAddrPortTargetAddrIPVersion(t *testing.T) {
 	}
 
 	switch runtime.GOOS {
-	case "dragonfly", "openbsd":
+	case "dragonfly", "openbsd", "wasip3":
 		// DragonflyBSD's IPv6 sockets are always IPv6-only, according to the man page:
 		// https://www.dragonflybsd.org/cgi/web-man?command=ip6 (search for IPV6_V6ONLY).
 		// OpenBSD's IPv6 sockets are always IPv6-only, according to the man page:
 		// https://man.openbsd.org/ip6#IPV6_V6ONLY
+		// So are wasi:sockets IPv6 sockets.
 		t.Skipf("skipping on %v", runtime.GOOS)
 	}
 

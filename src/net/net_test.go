@@ -578,8 +578,9 @@ func TestNotTemporaryRead(t *testing.T) {
 		t.Fatal("Read succeeded unexpectedly")
 	} else if err == io.EOF {
 		// This happens on Plan 9, but for some reason (prior to CL 385314) it was
-		// accepted everywhere else too.
-		if runtime.GOOS == "plan9" {
+		// accepted everywhere else too. wasi:sockets has no SO_LINGER, so Close
+		// can't reset the connection.
+		if runtime.GOOS == "plan9" || runtime.GOOS == "wasip3" {
 			return
 		}
 		t.Fatal("Read unexpectedly returned io.EOF after socket was abruptly closed")

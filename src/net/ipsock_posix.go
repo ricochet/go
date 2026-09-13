@@ -27,11 +27,17 @@ import (
 // IPv6 support too. So probe the kernel to figure it out.
 func (p *ipStackCapabilities) probe() {
 	switch runtime.GOOS {
-	case "js", "wasip1", "wasip3":
+	case "js", "wasip1":
 		// Both ipv4 and ipv6 are faked; see net_fake.go.
 		p.ipv4Enabled = true
 		p.ipv6Enabled = true
 		p.ipv4MappedIPv6Enabled = true
+		return
+	case "wasip3":
+		// wasi:sockets supports both, but IPv6 sockets don't accept
+		// IPv4-mapped addresses.
+		p.ipv4Enabled = true
+		p.ipv6Enabled = true
 		return
 	}
 

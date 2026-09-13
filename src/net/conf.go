@@ -172,7 +172,7 @@ func goosPrefersCgo() bool {
 	// systems did not support the go resolver.
 	// Keep it this way for better compatibility.
 	// Perhaps we can revisit this some day.
-	case "windows", "plan9":
+	case "windows", "plan9", "wasip3":
 		return true
 
 	// Darwin pops up annoying dialog boxes if programs try to

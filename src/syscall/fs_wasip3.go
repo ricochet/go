@@ -255,6 +255,7 @@ func p3AwaitResult(future uint32) Errno {
 type p3File struct {
 	mu      sync.Mutex
 	handle  uint32
+	socket  bool // a socket that package net manages, with no descriptor
 	append  bool
 	preopen string // the name of a preopened directory
 	offset  int64  // the position for fd_read, fd_write and fd_seek
@@ -298,8 +299,8 @@ func p3LoadPreopens() {
 	wasip3CabiRelease()
 }
 
-// p3GetFile returns the descriptor of fd.
-func p3GetFile(fd int32) (*p3File, Errno) {
+// p3GetEntry returns the table entry of fd, which may be a socket.
+func p3GetEntry(fd int32) (*p3File, Errno) {
 	p3Files.once.Do(p3LoadPreopens)
 	p3Files.mu.Lock()
 	defer p3Files.mu.Unlock()
@@ -307,6 +308,24 @@ func p3GetFile(fd int32) (*p3File, Errno) {
 		return nil, EBADF
 	}
 	return p3Files.table[fd], 0
+}
+
+// p3GetFile returns the descriptor of fd.
+func p3GetFile(fd int32) (*p3File, Errno) {
+	f, errno := p3GetEntry(fd)
+	if errno == 0 && f.socket {
+		return nil, ENOTSUP
+	}
+	return f, errno
+}
+
+// wasip3SocketFD allocates a file descriptor for a socket, for package net.
+// Package net keeps the socket's resources; closing the file descriptor only
+// frees it.
+//
+//go:linkname wasip3SocketFD
+func wasip3SocketFD() int {
+	return int(p3AddFile(&p3File{socket: true}))
 }
 
 // p3AddFile allocates the lowest free file descriptor for f.
@@ -587,13 +606,16 @@ func fd_close(fd int32) Errno {
 	if isStdio(fd) {
 		return 0
 	}
-	f, errno := p3GetFile(fd)
+	f, errno := p3GetEntry(fd)
 	if errno != 0 {
 		return errno
 	}
 	p3Files.mu.Lock()
 	p3Files.table[fd] = nil
 	p3Files.mu.Unlock()
+	if f.socket {
+		return 0
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closeStream()
@@ -612,9 +634,14 @@ func fd_fdstat_get(fd int32, buf *fdstat) Errno {
 		}
 		return 0
 	}
-	f, errno := p3GetFile(fd)
+	f, errno := p3GetEntry(fd)
 	if errno != 0 {
 		return errno
+	}
+	if f.socket {
+		buf.filetype = FILETYPE_SOCKET_STREAM
+		buf.rightsBase = fullRights
+		return 0
 	}
 	res := make([]byte, p3ResultSize)
 	wasip3CabiHold()
@@ -644,7 +671,7 @@ func fd_fdstat_set_rights(fd int32, rightsBase rights, rightsInheriting rights) 
 }
 
 func fd_prestat_get(fd int32, prestat *prestat) Errno {
-	f, errno := p3GetFile(fd)
+	f, errno := p3GetEntry(fd)
 	if errno != 0 {
 		return errno
 	}
@@ -711,9 +738,13 @@ func fd_filestat_get(fd int32, buf unsafe.Pointer) Errno {
 		*st = Stat_t{Filetype: FILETYPE_CHARACTER_DEVICE}
 		return 0
 	}
-	f, errno := p3GetFile(fd)
+	f, errno := p3GetEntry(fd)
 	if errno != 0 {
 		return errno
+	}
+	if f.socket {
+		*st = Stat_t{Filetype: FILETYPE_SOCKET_STREAM}
+		return 0
 	}
 	return p3StatInto(st, f.handle, false, 0, nil, 0)
 }
