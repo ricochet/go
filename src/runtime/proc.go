@@ -4231,6 +4231,12 @@ top:
 		}
 	}
 
+	if p3TaskDefer(gp) {
+		// On GOOS=wasip3, gp belongs to a Component Model task other than
+		// the one running (see task_wasip3.go).
+		goto top
+	}
+
 	// If about to schedule a not-normal goroutine (a GCworker or tracereader),
 	// wake a P if there is one.
 	if tryWakeP {
@@ -5390,11 +5396,11 @@ func newproc1(fn *funcval, callergp *g, callerpc uintptr, parked bool, waitreaso
 	newg.sched.pc = abi.FuncPCABI0(goexit) + sys.PCQuantum // +PCQuantum so that previous instruction is in same function
 	newg.sched.g = guintptr(unsafe.Pointer(newg))
 	gostartcallfn(&newg.sched, fn)
-	coopNewproc(newg)
 	newg.parentGoid = callergp.goid
 	newg.gopc = callerpc
 	newg.ancestors = saveAncestors(callergp)
 	newg.startpc = fn.fn
+	coopNewproc(newg)
 	newg.runningCleanups.Store(false)
 	if isSystemGoroutine(newg, false) {
 		sched.ngsys.Add(1)

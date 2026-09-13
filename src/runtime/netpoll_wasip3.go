@@ -47,6 +47,7 @@ type p3Waiter struct {
 	mode    int32
 	when    int64 // for a timer subtask, when it completes (in nanotime)
 	timer   bool
+	notify  uint32 // for a task's notification future, the task id
 }
 
 // p3Op mirrors package net's p3Op.
@@ -110,6 +111,11 @@ func p3PollSet() uint32 {
 // p3Join joins waitable h to the current waitable set, recording a waiter
 // for it.
 func p3Join(h uint32) *p3Waiter {
+	return p3JoinSet(h, p3PollSet())
+}
+
+// p3JoinSet joins waitable h to waitable set set, recording a waiter for it.
+func p3JoinSet(h, set uint32) *p3Waiter {
 	if int(h) >= p3Poll.numWaiters {
 		n := max(64, 2*int(h))
 		p := persistentalloc(unsafe.Sizeof(p3Waiter{})*uintptr(n), 0, &memstats.other_sys)
@@ -120,8 +126,8 @@ func p3Join(h uint32) *p3Waiter {
 	if w.handle != 0 {
 		throw("runtime: waitable already has a waiter")
 	}
-	*w = p3Waiter{handle: h, set: p3PollSet()}
-	p3WaitableJoin(h, w.set)
+	*w = p3Waiter{handle: h, set: set}
+	p3WaitableJoin(h, set)
 	return w
 }
 
@@ -247,6 +253,11 @@ func p3Deliver(toRun *gList, code, h, payload uint32) int32 {
 	}
 	p3WaitableJoin(h, 0)
 	switch {
+	case w.notify != 0:
+		id := w.notify
+		*w = p3Waiter{}
+		p3TaskNotified(id)
+		return 0
 	case w.timer:
 		p3SubtaskDrop(h)
 		*w = p3Waiter{}
@@ -285,19 +296,23 @@ func wasip3AwaitCall(status uint32) {
 	p3AwaitCall(status)
 }
 
-// wasip3PollNewSet returns a new waitable set.
+// wasip3PollNewSet returns a new waitable set, for a new task.
 //
 //go:linkname wasip3PollNewSet
 func wasip3PollNewSet() uint32 {
-	return p3WaitableSetNew()
+	set := p3WaitableSetNew()
+	p3TaskNew(set)
+	return set
 }
 
-// wasip3PollSetCurrent makes set the current waitable set, which waitables
-// join when goroutines start waiting for them.
+// wasip3PollSetCurrent makes set, the waitable set of the task whose callback
+// is running, the current waitable set, which waitables join when goroutines
+// start waiting for them.
 //
 //go:linkname wasip3PollSetCurrent
 func wasip3PollSetCurrent(set uint32) {
 	p3Poll.set = set
+	p3TaskSetCurrent(set)
 }
 
 // wasip3PollDeliver delivers an event that the host passed to a task's
@@ -312,25 +327,32 @@ func wasip3PollDeliver(code, h, payload uint32) {
 
 // Results of wasip3PollIdle.
 const (
-	p3IdleDone  = 0 // nothing is waiting in the set
+	p3IdleDone  = 0 // the task is done
 	p3IdleWait  = 1 // wait for an event in the set
 	p3IdleYield = 2 // a timer is already due
 )
 
-// wasip3PollIdle is called by a task when no goroutine can run. It makes
-// sure a timer subtask in the current waitable set completes when the next
-// goroutine timer is due, and reports what the task should do.
+// wasip3PollIdle is called by a task when no goroutine can run, with whether
+// the task's export has produced its result. It makes sure a timer subtask in
+// the current waitable set completes when the next goroutine timer is due,
+// and reports what the task should do. The task is done once its export has
+// produced its result and nothing else is waiting in the set; until then, its
+// notification (see task_wasip3.go) lets the runtime wake it up.
 //
 //go:linkname wasip3PollIdle
-func wasip3PollIdle() int {
+func wasip3PollIdle(returned bool) int {
 	if idleTimer >= 0 && p3ArmTimer(idleTimer) {
 		return p3IdleYield
 	}
+	if !returned {
+		return p3IdleWait
+	}
 	set := p3PollSet()
 	for i := range p3Waiters() {
-		if w := &p3Waiters()[i]; w.handle != 0 && w.set == set {
+		if w := &p3Waiters()[i]; w.handle != 0 && w.set == set && w.notify == 0 {
 			return p3IdleWait
 		}
 	}
+	p3TaskExit()
 	return p3IdleDone
 }

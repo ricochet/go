@@ -309,6 +309,11 @@ var p3BlockSet uint32
 
 // p3BlockOn waits for an event on waitable h, blocking the whole program,
 // and returns the event's payload.
+//
+// In a library, this blocks inside a call of a callback-lifted export (see
+// netpoll_wasip3.go), during which the host neither starts other export calls
+// nor delivers events to other tasks, so Go is not reentered. The same holds
+// for other import calls that block, such as socket binds and cancellations.
 func p3BlockOn(h uint32) uint32 {
 	if p3BlockSet == 0 {
 		p3BlockSet = p3WaitableSetNew()

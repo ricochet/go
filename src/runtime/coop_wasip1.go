@@ -102,6 +102,12 @@ var (
 	// GOEXPERIMENT=wasmstackful starts it on the first export call).
 	coopMainStarted uintptr
 
+	// coopIdleSP is the SP that the last top-level export call left, or 0.
+	// The next top-level call starts from it rather than from the SP global,
+	// which a thread exiting meanwhile may have written (see
+	// coopRetireThread).
+	coopIdleSP uintptr
+
 	// Task epochs. A Component Model thread belongs to the task of the
 	// thread that created it, and task-scoped built-ins such as task.return
 	// act on that task. Each top-level export call is a new task and starts
@@ -135,6 +141,10 @@ func coopNewproc(gp *g) {
 		print("coop: new thread ", gp.coop.thread, " epoch ", gp.coop.epoch, " for g", gp.goid, "\n")
 	}
 }
+
+// p3TaskDefer is not needed with threads, which belong to tasks themselves
+// (see task_wasip3.go).
+func p3TaskDefer(*g) bool { return false }
 
 // coopRetireThread makes the thread of an exited goroutine, which is
 // suspended in gogo, exit.

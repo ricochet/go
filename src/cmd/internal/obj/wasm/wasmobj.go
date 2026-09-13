@@ -159,6 +159,7 @@ var (
 	coopMainStarted       *obj.LSym
 	coopStartMain         *obj.LSym
 	goexit                *obj.LSym
+	coopIdleSP            *obj.LSym
 )
 
 // stackful reports whether GOEXPERIMENT=wasmstackful is in effect: calls are
@@ -266,6 +267,7 @@ func instinit(ctxt *obj.Link) {
 		coopMainStarted = ctxt.Lookup("runtime.coopMainStarted")
 		coopStartMain = ctxt.Lookup("runtime.wasmCoopStartMain")
 		goexit = ctxt.LookupABI("runtime.goexit", obj.ABI0)
+		coopIdleSP = ctxt.Lookup("runtime.coopIdleSP")
 	}
 }
 
@@ -1214,6 +1216,22 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 		p = appendp(p, AIf)
 		p = appendp(p, ACall, obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: coopStartMain})
 		p = appendp(p, AEnd)
+		// A thread that exited without resuming a goroutine may have
+		// written the SP global since (see runtime.coopRetireThread), so
+		// use the SP that the last top-level call left, if any.
+		idleSP := obj.Addr{Type: obj.TYPE_ADDR, Name: obj.NAME_EXTERN, Sym: coopIdleSP}
+		p = appendp(p, AI64Const, idleSP)
+		p = appendp(p, AI32WrapI64)
+		p = appendp(p, AI64Load, constAddr(0))
+		p = appendp(p, AI64Eqz)
+		p = appendp(p, AIf)
+		p = appendp(p, AElse)
+		p = appendp(p, AI64Const, idleSP)
+		p = appendp(p, AI32WrapI64)
+		p = appendp(p, AI64Load, constAddr(0))
+		p = appendp(p, AI32WrapI64)
+		p = appendp(p, ASet, regAddr(REG_SP))
+		p = appendp(p, AEnd)
 		p = appendp(p, ACALLNORESUME, obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: coopExportEnter})
 		// Such a call has no Go caller: the frames of runtime.main were
 		// discarded when it paused, so the slot above this frame holds
@@ -1339,6 +1357,20 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 		p = appendp(p, AI32Const, constAddr(framesize))
 		p = appendp(p, AI32Add)
 		p = appendp(p, ASet, regAddr(REG_SP))
+	}
+	if coopEntry {
+		// Record the SP that a top-level call leaves (see above).
+		p = appendp(p, AI64Const, obj.Addr{Type: obj.TYPE_ADDR, Name: obj.NAME_EXTERN, Sym: coopActive})
+		p = appendp(p, AI32WrapI64)
+		p = appendp(p, AI64Load, constAddr(0))
+		p = appendp(p, AI64Eqz)
+		p = appendp(p, AIf)
+		p = appendp(p, AI64Const, obj.Addr{Type: obj.TYPE_ADDR, Name: obj.NAME_EXTERN, Sym: coopIdleSP})
+		p = appendp(p, AI32WrapI64)
+		p = appendp(p, AGet, regAddr(REG_SP))
+		p = appendp(p, AI64ExtendI32U)
+		p = appendp(p, AI64Store, constAddr(0))
+		p = appendp(p, AEnd)
 	}
 	p = appendp(p, AReturn)
 }
@@ -1891,8 +1923,19 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 					Sym:  p.To.Sym,
 				})
 				if hasLocalSP {
-					// The stack may have moved, which changes SP. Update the local SP variable.
-					updateLocalSP(w)
+					if p.Mark&WasmImport != 0 && stackful() {
+						// As with GOEXPERIMENT=wasmspparam, a host
+						// import may let other threads write the SP
+						// global (see runtime.coopRetireThread), so
+						// keep the local SP and restore the global.
+						writeOpcode(w, ALocalGet)
+						writeUleb128(w, localSP)
+						writeOpcode(w, AGlobalSet)
+						writeUleb128(w, 0)
+					} else {
+						// The stack may have moved, which changes SP. Update the local SP variable.
+						updateLocalSP(w)
+					}
 				}
 
 			default:
