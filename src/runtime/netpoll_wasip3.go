@@ -218,6 +218,10 @@ func p3ArmTimer(delay int64) bool {
 // event arrives; if delay == 0, it does not block; if delay > 0, it blocks
 // for up to delay nanoseconds.
 func netpoll(delay int64) (gList, int32) {
+	if p3Clocks.paused {
+		// In cabi_realloc, which can't call imports.
+		return gList{}, 0
+	}
 	if delay > 0 && p3ArmTimer(delay) {
 		delay = 0
 	}

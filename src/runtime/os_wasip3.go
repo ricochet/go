@@ -408,7 +408,8 @@ func nanotime1() int64 {
 // wasip3PauseClocks sets whether the clocks are paused. The host doesn't let
 // a component call imports from cabi_realloc, so Component Model bindings
 // whose cabi_realloc allocates Go memory pause the clocks, which the garbage
-// collector reads, while it runs.
+// collector reads, while it runs. The network poller doesn't poll then either
+// (a collection polls when it restarts the world).
 //
 //go:linkname wasip3PauseClocks
 func wasip3PauseClocks(paused bool) {
