@@ -8,7 +8,6 @@ package syscall
 
 import (
 	"internal/byteorder"
-	"runtime"
 	"sync"
 	"unsafe"
 )
@@ -219,12 +218,60 @@ func p3Ptr(b []byte) uint32 {
 	return uint32(uintptr(unsafe.Pointer(unsafe.SliceData(b))))
 }
 
-// p3Path returns a copy of a path in the heap, with at least one byte so
-// that it has an address.
-func p3Path(path *byte, pathLen size) []byte {
-	b := make([]byte, pathLen, pathLen+1)
-	copy(b, unsafe.Slice(path, pathLen))
+// A p3Call is heap memory for one import call: its parameters, if passed
+// in memory, its results, and copies of its paths. The host may read the
+// parameters after the call returns, if the callee starts later, and writes
+// the results once it's done, so the memory must not be on the stack. Calls
+// reuse it, to not allocate for each.
+type p3Call struct {
+	params [8]uint64  // 64 bytes, align 8
+	res    [14]uint64 // 112 bytes
+	hash   [3]uint64  // 24 bytes
+	path   []byte
+	path2  []byte
+}
+
+var p3Calls = sync.Pool{New: func() any { return new(p3Call) }}
+
+func p3NewCall() *p3Call {
+	return p3Calls.Get().(*p3Call)
+}
+
+func (c *p3Call) done() {
+	if cap(c.path) > 1024 || cap(c.path2) > 1024 {
+		c.path, c.path2 = nil, nil
+	}
+	p3Calls.Put(c)
+}
+
+// paramBuf returns n bytes of zeroed memory for parameters.
+func (c *p3Call) paramBuf(n int) []byte {
+	b := unsafe.Slice((*byte)(unsafe.Pointer(&c.params)), unsafe.Sizeof(c.params))[:n]
+	clear(b)
 	return b
+}
+
+// resBuf returns n bytes of zeroed memory for a result.
+func (c *p3Call) resBuf(n int) []byte {
+	b := unsafe.Slice((*byte)(unsafe.Pointer(&c.res)), unsafe.Sizeof(c.res))[:n]
+	clear(b)
+	return b
+}
+
+// hashBuf returns memory for a metadata-hash result.
+func (c *p3Call) hashBuf() []byte {
+	b := unsafe.Slice((*byte)(unsafe.Pointer(&c.hash)), unsafe.Sizeof(c.hash))
+	clear(b)
+	return b
+}
+
+// p3CopyPath copies a path into buf, reusing its memory, and returns the
+// copy, which has room for at least one byte, so that it has an address.
+func p3CopyPath(buf []byte, path *byte, pathLen size) []byte {
+	if cap(buf) == 0 {
+		buf = make([]byte, 0, max(64, pathLen))
+	}
+	return append(buf[:0], unsafe.Slice(path, pathLen)...)
 }
 
 func p3PathPtr(b []byte) unsafe.Pointer {
@@ -238,7 +285,9 @@ func p3String(ptr, n uint32) string {
 
 // p3AwaitResult reads a future<result<_, error-code>>.
 func p3AwaitResult(future uint32) Errno {
-	res := make([]byte, p3ResultSize)
+	c := p3NewCall()
+	defer c.done()
+	res := c.resBuf(p3ResultSize)
 	wasip3CabiHold()
 	defer wasip3CabiRelease()
 	code := p3ResultRead(future, unsafe.Pointer(&res[0]))
@@ -268,15 +317,35 @@ type p3File struct {
 	pos     int64
 	wappend bool
 
-	buf []byte // memory for stream reads and writes
+	buf []byte // memory for stream reads and writes, from p3SmallBufs or p3Bufs
 
-	entries []p3Entry // the directory listing for fd_readdir
+	dir *p3Dir // the directory listing for fd_readdir
+}
+
+// Stream buffers, reused by files once they're closed.
+const (
+	p3SmallBufSize = 4 << 10
+	p3BufSize      = 64 << 10
+)
+
+var (
+	p3SmallBufs = sync.Pool{New: func() any { return new([p3SmallBufSize]byte) }}
+	p3Bufs      = sync.Pool{New: func() any { return new([p3BufSize]byte) }}
+)
+
+// A p3Dir is a directory listing, reused by files once they're closed.
+type p3Dir struct {
+	entries []p3Entry
+	names   []byte // the entries' names, one after another
+	buf     [64 * p3EntrySize]byte
 }
 
 type p3Entry struct {
-	name string
+	name uint32 // the end of the name in names
 	typ  filetype
 }
+
+var p3Dirs = sync.Pool{New: func() any { return new(p3Dir) }}
 
 var p3Files struct {
 	once  sync.Once
@@ -349,12 +418,36 @@ func isStdio(fd int32) bool {
 
 // ioBuf returns heap memory for up to n bytes of stream I/O.
 func (f *p3File) ioBuf(n int) []byte {
-	const max = 64 << 10
-	n = min(n, max)
+	n = min(n, p3BufSize)
 	if len(f.buf) < n {
-		f.buf = make([]byte, n)
+		f.freeBuf()
+		if n <= p3SmallBufSize {
+			f.buf = p3SmallBufs.Get().(*[p3SmallBufSize]byte)[:]
+		} else {
+			f.buf = p3Bufs.Get().(*[p3BufSize]byte)[:]
+		}
 	}
 	return f.buf[:n]
+}
+
+// freeBuf returns the file's stream buffer for reuse. No stream operation
+// may be pending.
+func (f *p3File) freeBuf() {
+	switch len(f.buf) {
+	case p3SmallBufSize:
+		p3SmallBufs.Put((*[p3SmallBufSize]byte)(f.buf))
+	case p3BufSize:
+		p3Bufs.Put((*[p3BufSize]byte)(f.buf))
+	}
+	f.buf = nil
+}
+
+// freeDir returns the file's directory listing for reuse, unless it's large.
+func (f *p3File) freeDir() {
+	if d := f.dir; d != nil && cap(d.names) <= 1<<20 {
+		p3Dirs.Put(d)
+	}
+	f.dir = nil
 }
 
 // closeStream drops the open stream, if any.
@@ -620,6 +713,8 @@ func fd_close(fd int32) Errno {
 	defer f.mu.Unlock()
 	f.closeStream()
 	p3DescriptorDrop(f.handle)
+	f.freeBuf()
+	f.freeDir()
 	return 0
 }
 
@@ -643,7 +738,9 @@ func fd_fdstat_get(fd int32, buf *fdstat) Errno {
 		buf.rightsBase = fullRights
 		return 0
 	}
-	res := make([]byte, p3ResultSize)
+	c := p3NewCall()
+	defer c.done()
+	res := c.resBuf(p3ResultSize)
 	wasip3CabiHold()
 	defer wasip3CabiRelease()
 	wasip3AwaitCall(p3GetType(f.handle, unsafe.Pointer(&res[0])))
@@ -698,16 +795,18 @@ func fd_prestat_dir_name(fd int32, path *byte, pathLen size) Errno {
 // p3StatInto stats a descriptor, or a path relative to it if at is set, into
 // st.
 func p3StatInto(st *Stat_t, self uint32, at bool, flags lookupflags, path *byte, pathLen size) Errno {
-	res := make([]byte, p3StatResultSize)
-	hash := make([]byte, p3HashResultSize)
+	c := p3NewCall()
+	defer c.done()
+	res := c.resBuf(p3StatResultSize)
+	hash := c.hashBuf()
 	wasip3CabiHold()
 	defer wasip3CabiRelease()
 	// Start both calls before waiting for either.
 	var s1, s2 uint32
 	if at {
-		p := p3Path(path, pathLen)
-		s1 = p3StatAt(self, flags, p3PathPtr(p), pathLen, unsafe.Pointer(&res[0]))
-		s2 = p3MetadataHashAt(self, flags, p3PathPtr(p), pathLen, unsafe.Pointer(&hash[0]))
+		c.path = p3CopyPath(c.path, path, pathLen)
+		s1 = p3StatAt(self, flags, p3PathPtr(c.path), pathLen, unsafe.Pointer(&res[0]))
+		s2 = p3MetadataHashAt(self, flags, p3PathPtr(c.path), pathLen, unsafe.Pointer(&hash[0]))
 	} else {
 		s1 = p3Stat(self, unsafe.Pointer(&res[0]))
 		s2 = p3MetadataHash(self, unsafe.Pointer(&hash[0]))
@@ -766,7 +865,9 @@ func fd_filestat_set_size(fd int32, set_size filesize) Errno {
 	if errno != 0 {
 		return errno
 	}
-	res := make([]byte, p3ResultSize)
+	c := p3NewCall()
+	defer c.done()
+	res := c.resBuf(p3ResultSize)
 	wasip3CabiHold()
 	defer wasip3CabiRelease()
 	wasip3AwaitCall(p3SetSize(f.handle, uint64(set_size), unsafe.Pointer(&res[0])))
@@ -781,7 +882,9 @@ func fd_sync(fd int32) Errno {
 	if errno != 0 {
 		return errno
 	}
-	res := make([]byte, p3ResultSize)
+	c := p3NewCall()
+	defer c.done()
+	res := c.resBuf(p3ResultSize)
 	wasip3CabiHold()
 	defer wasip3CabiRelease()
 	wasip3AwaitCall(p3Sync(f.handle, unsafe.Pointer(&res[0])))
@@ -799,63 +902,68 @@ func fd_readdir(fd int32, buf *byte, bufLen size, cookie dircookie, nwritten *si
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if cookie == 0 || f.entries == nil {
-		entries, errno := p3ReadEntries(f.handle)
-		if errno != 0 {
+	if cookie == 0 || f.dir == nil {
+		if f.dir == nil {
+			f.dir = p3Dirs.Get().(*p3Dir)
+		}
+		if errno := f.dir.read(f.handle); errno != 0 {
+			f.freeDir()
 			return errno
 		}
-		f.entries = entries
 	}
 	// Write as many entries as fit, truncating the last one like
 	// preview 1 implementations do.
+	d := f.dir
 	out := unsafe.Slice(buf, bufLen)
 	n := 0
-	for i := int(cookie); i < len(f.entries) && n < len(out); i++ {
-		e := &f.entries[i]
+	for i := int(cookie); i < len(d.entries) && n < len(out); i++ {
+		e := &d.entries[i]
+		start := uint32(0)
+		if i > 0 {
+			start = d.entries[i-1].name
+		}
+		name := d.names[start:e.name]
 		var hdr [unsafe.Sizeof(Dirent{}) - unsafe.Sizeof(Dirent{}.Name)]byte
 		byteorder.LEPutUint64(hdr[unsafe.Offsetof(Dirent{}.Next):], uint64(i+1))
-		byteorder.LEPutUint32(hdr[unsafe.Offsetof(Dirent{}.Namlen):], uint32(len(e.name)))
+		byteorder.LEPutUint32(hdr[unsafe.Offsetof(Dirent{}.Namlen):], uint32(len(name)))
 		hdr[unsafe.Offsetof(Dirent{}.Type)] = e.typ
 		n += copy(out[n:], hdr[:])
-		n += copy(out[n:], e.name)
+		n += copy(out[n:], name)
 	}
 	*nwritten = size(n)
 	return 0
 }
 
-// p3ReadEntries lists a directory.
-func p3ReadEntries(self uint32) ([]p3Entry, Errno) {
+// read lists a directory into d, replacing its previous listing.
+func (d *p3Dir) read(self uint32) Errno {
+	d.entries, d.names = d.entries[:0], d.names[:0]
 	var pair [2]uint32
 	p3ReadDirectory(self, &pair)
 	stream, future := pair[0], pair[1]
 	defer p3EntriesDropReadable(stream)
 	defer p3ResultDropReadable(future)
 
-	const batch = 64
-	buf := make([]byte, batch*p3EntrySize)
-	entries := []p3Entry{}
 	wasip3CabiHold()
 	defer wasip3CabiRelease()
 	for {
-		code := p3EntriesRead(stream, unsafe.Pointer(&buf[0]), batch)
+		code := p3EntriesRead(stream, unsafe.Pointer(&d.buf[0]), uint32(len(d.buf)/p3EntrySize))
 		if code == p3Blocked {
 			_, code = wasip3Await(stream)
 		}
 		for i := range int(code >> 4) {
-			e := buf[i*p3EntrySize:]
-			entries = append(entries, p3Entry{
+			e := d.buf[i*p3EntrySize:]
+			ptr, n := byteorder.LEUint32(e[16:]), byteorder.LEUint32(e[20:])
+			d.names = append(d.names, unsafe.Slice((*byte)(unsafe.Pointer(uintptr(ptr))), n)...)
+			d.entries = append(d.entries, p3Entry{
+				name: uint32(len(d.names)),
 				typ:  p3Filetype(e[0]),
-				name: p3String(byteorder.LEUint32(e[16:]), byteorder.LEUint32(e[20:])),
 			})
 		}
 		if code&0xf == p3Dropped {
 			break
 		}
 	}
-	if errno := p3AwaitResult(future); errno != 0 {
-		return nil, errno
-	}
-	return entries, 0
+	return p3AwaitResult(future)
 }
 
 //go:linkname path_open
@@ -871,19 +979,20 @@ func path_open(rootFD int32, dirflags lookupflags, path *byte, pathLen size, ofl
 	if fsRightsBase&RIGHT_FD_WRITE != 0 {
 		flags |= 1 << 1 // write
 	}
-	p := p3Path(path, pathLen)
-	params := make([]byte, 20)
+	c := p3NewCall()
+	defer c.done()
+	c.path = p3CopyPath(c.path, path, pathLen)
+	params := c.paramBuf(20)
 	byteorder.LEPutUint32(params[0:], dir.handle)
 	params[4] = uint8(dirflags)
-	byteorder.LEPutUint32(params[8:], p3Ptr(p[:cap(p)]))
+	byteorder.LEPutUint32(params[8:], p3Ptr(c.path[:cap(c.path)]))
 	byteorder.LEPutUint32(params[12:], pathLen)
 	params[16] = uint8(oflags) // the open-flags bits match preview 1
 	params[17] = flags
-	res := make([]byte, p3ResultSize)
+	res := c.resBuf(p3ResultSize)
 	wasip3CabiHold()
 	defer wasip3CabiRelease()
 	wasip3AwaitCall(p3OpenAt(unsafe.Pointer(&params[0]), unsafe.Pointer(&res[0])))
-	runtime.KeepAlive(p)
 	if errno := p3Errno(res, p3ResultPayload); errno != 0 {
 		return errno
 	}
@@ -901,18 +1010,21 @@ func p3PathCall(fd int32, path *byte, pathLen size, method int) Errno {
 	if errno != 0 {
 		return errno
 	}
-	p := p3Path(path, pathLen)
-	res := make([]byte, p3ResultSize)
+	c := p3NewCall()
+	defer c.done()
+	c.path = p3CopyPath(c.path, path, pathLen)
+	p := p3PathPtr(c.path)
+	res := c.resBuf(p3ResultSize)
 	wasip3CabiHold()
 	defer wasip3CabiRelease()
 	var status uint32
 	switch method {
 	case p3CreateDirectory:
-		status = p3CreateDirectoryAt(dir.handle, p3PathPtr(p), pathLen, unsafe.Pointer(&res[0]))
+		status = p3CreateDirectoryAt(dir.handle, p, pathLen, unsafe.Pointer(&res[0]))
 	case p3RemoveDirectory:
-		status = p3RemoveDirectoryAt(dir.handle, p3PathPtr(p), pathLen, unsafe.Pointer(&res[0]))
+		status = p3RemoveDirectoryAt(dir.handle, p, pathLen, unsafe.Pointer(&res[0]))
 	case p3UnlinkFile:
-		status = p3UnlinkFileAt(dir.handle, p3PathPtr(p), pathLen, unsafe.Pointer(&res[0]))
+		status = p3UnlinkFileAt(dir.handle, p, pathLen, unsafe.Pointer(&res[0]))
 	}
 	wasip3AwaitCall(status)
 	return p3Errno(res, p3ResultPayload)
@@ -946,11 +1058,13 @@ func path_readlink(fd int32, path *byte, pathLen size, buf *byte, bufLen size, n
 	if errno != 0 {
 		return errno
 	}
-	p := p3Path(path, pathLen)
-	res := make([]byte, p3ResultSize)
+	c := p3NewCall()
+	defer c.done()
+	c.path = p3CopyPath(c.path, path, pathLen)
+	res := c.resBuf(p3ResultSize)
 	wasip3CabiHold()
 	defer wasip3CabiRelease()
-	wasip3AwaitCall(p3ReadlinkAt(dir.handle, p3PathPtr(p), pathLen, unsafe.Pointer(&res[0])))
+	wasip3AwaitCall(p3ReadlinkAt(dir.handle, p3PathPtr(c.path), pathLen, unsafe.Pointer(&res[0])))
 	if errno := p3Errno(res, p3ResultPayload); errno != 0 {
 		return errno
 	}
@@ -966,19 +1080,20 @@ func path_filestat_set_times(fd int32, flags lookupflags, path *byte, pathLen si
 	if errno != 0 {
 		return errno
 	}
-	p := p3Path(path, pathLen)
-	params := make([]byte, 64)
+	c := p3NewCall()
+	defer c.done()
+	c.path = p3CopyPath(c.path, path, pathLen)
+	params := c.paramBuf(64)
 	byteorder.LEPutUint32(params[0:], dir.handle)
 	params[4] = uint8(flags)
-	byteorder.LEPutUint32(params[8:], p3Ptr(p[:cap(p)]))
+	byteorder.LEPutUint32(params[8:], p3Ptr(c.path[:cap(c.path)]))
 	byteorder.LEPutUint32(params[12:], pathLen)
 	p3PutTimestamp(params[16:], atim, fstflags&FILESTAT_SET_ATIM != 0, fstflags&FILESTAT_SET_ATIM_NOW != 0)
 	p3PutTimestamp(params[40:], mtim, fstflags&FILESTAT_SET_MTIM != 0, fstflags&FILESTAT_SET_MTIM_NOW != 0)
-	res := make([]byte, p3ResultSize)
+	res := c.resBuf(p3ResultSize)
 	wasip3CabiHold()
 	defer wasip3CabiRelease()
 	wasip3AwaitCall(p3SetTimesAt(unsafe.Pointer(&params[0]), unsafe.Pointer(&res[0])))
-	runtime.KeepAlive(p)
 	return p3Errno(res, p3ResultPayload)
 }
 
@@ -992,21 +1107,22 @@ func path_link(oldFd int32, oldFlags lookupflags, oldPath *byte, oldPathLen size
 	if errno != 0 {
 		return errno
 	}
-	op, np := p3Path(oldPath, oldPathLen), p3Path(newPath, newPathLen)
-	params := make([]byte, 28)
+	c := p3NewCall()
+	defer c.done()
+	c.path = p3CopyPath(c.path, oldPath, oldPathLen)
+	c.path2 = p3CopyPath(c.path2, newPath, newPathLen)
+	params := c.paramBuf(28)
 	byteorder.LEPutUint32(params[0:], oldDir.handle)
 	params[4] = uint8(oldFlags)
-	byteorder.LEPutUint32(params[8:], p3Ptr(op[:cap(op)]))
+	byteorder.LEPutUint32(params[8:], p3Ptr(c.path[:cap(c.path)]))
 	byteorder.LEPutUint32(params[12:], oldPathLen)
 	byteorder.LEPutUint32(params[16:], newDir.handle)
-	byteorder.LEPutUint32(params[20:], p3Ptr(np[:cap(np)]))
+	byteorder.LEPutUint32(params[20:], p3Ptr(c.path2[:cap(c.path2)]))
 	byteorder.LEPutUint32(params[24:], newPathLen)
-	res := make([]byte, p3ResultSize)
+	res := c.resBuf(p3ResultSize)
 	wasip3CabiHold()
 	defer wasip3CabiRelease()
 	wasip3AwaitCall(p3LinkAt(unsafe.Pointer(&params[0]), unsafe.Pointer(&res[0])))
-	runtime.KeepAlive(op)
-	runtime.KeepAlive(np)
 	return p3Errno(res, p3ResultPayload)
 }
 
@@ -1020,20 +1136,21 @@ func path_rename(oldFd int32, oldPath *byte, oldPathLen size, newFd int32, newPa
 	if errno != 0 {
 		return errno
 	}
-	op, np := p3Path(oldPath, oldPathLen), p3Path(newPath, newPathLen)
-	params := make([]byte, 24)
+	c := p3NewCall()
+	defer c.done()
+	c.path = p3CopyPath(c.path, oldPath, oldPathLen)
+	c.path2 = p3CopyPath(c.path2, newPath, newPathLen)
+	params := c.paramBuf(24)
 	byteorder.LEPutUint32(params[0:], oldDir.handle)
-	byteorder.LEPutUint32(params[4:], p3Ptr(op[:cap(op)]))
+	byteorder.LEPutUint32(params[4:], p3Ptr(c.path[:cap(c.path)]))
 	byteorder.LEPutUint32(params[8:], oldPathLen)
 	byteorder.LEPutUint32(params[12:], newDir.handle)
-	byteorder.LEPutUint32(params[16:], p3Ptr(np[:cap(np)]))
+	byteorder.LEPutUint32(params[16:], p3Ptr(c.path2[:cap(c.path2)]))
 	byteorder.LEPutUint32(params[20:], newPathLen)
-	res := make([]byte, p3ResultSize)
+	res := c.resBuf(p3ResultSize)
 	wasip3CabiHold()
 	defer wasip3CabiRelease()
 	wasip3AwaitCall(p3RenameAt(unsafe.Pointer(&params[0]), unsafe.Pointer(&res[0])))
-	runtime.KeepAlive(op)
-	runtime.KeepAlive(np)
 	return p3Errno(res, p3ResultPayload)
 }
 
@@ -1043,18 +1160,19 @@ func path_symlink(oldPath *byte, oldPathLen size, fd int32, newPath *byte, newPa
 	if errno != 0 {
 		return errno
 	}
-	op, np := p3Path(oldPath, oldPathLen), p3Path(newPath, newPathLen)
-	params := make([]byte, 20)
+	c := p3NewCall()
+	defer c.done()
+	c.path = p3CopyPath(c.path, oldPath, oldPathLen)
+	c.path2 = p3CopyPath(c.path2, newPath, newPathLen)
+	params := c.paramBuf(20)
 	byteorder.LEPutUint32(params[0:], dir.handle)
-	byteorder.LEPutUint32(params[4:], p3Ptr(op[:cap(op)]))
+	byteorder.LEPutUint32(params[4:], p3Ptr(c.path[:cap(c.path)]))
 	byteorder.LEPutUint32(params[8:], oldPathLen)
-	byteorder.LEPutUint32(params[12:], p3Ptr(np[:cap(np)]))
+	byteorder.LEPutUint32(params[12:], p3Ptr(c.path2[:cap(c.path2)]))
 	byteorder.LEPutUint32(params[16:], newPathLen)
-	res := make([]byte, p3ResultSize)
+	res := c.resBuf(p3ResultSize)
 	wasip3CabiHold()
 	defer wasip3CabiRelease()
 	wasip3AwaitCall(p3SymlinkAt(unsafe.Pointer(&params[0]), unsafe.Pointer(&res[0])))
-	runtime.KeepAlive(op)
-	runtime.KeepAlive(np)
 	return p3Errno(res, p3ResultPayload)
 }
