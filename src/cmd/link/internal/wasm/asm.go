@@ -474,22 +474,27 @@ func writeExportSec(ctxt *ld.Link, ldr *loader.Loader, lenHostImports int) {
 		numExports := 2 + len(ldr.WasmExports)
 		// With GOEXPERIMENT=wasmcoopthreads, thread.new-indirect resolves
 		// its start function through the table exported under
-		// __indirect_function_table. An executable also exports
+		// __indirect_function_table. A GOOS=wasip1 executable also exports
 		// cabi_realloc, through which the preview1 command adapter allocates
-		// before _start; GOOS=wasip1 c-shared modules get cabi_realloc from
-		// their bindings, and the reactor adapter only calls it after
-		// _initialize. A GOOS=wasip3 module lowers lists (e.g. its arguments
-		// or directory entries) from the host, which calls cabi_realloc, so
-		// it gets the runtime's unless it exports one itself (as Component
-		// Model bindings do).
+		// before _start; c-shared modules get cabi_realloc from their
+		// bindings, and the reactor adapter only calls it after _initialize.
+		// A GOOS=wasip3 module lowers lists (e.g. its arguments or directory
+		// entries) from the host, which calls cabi_realloc, so it exports the
+		// runtime's cabi_realloc_go as cabi_realloc, unless it exports one
+		// itself (as Component Model bindings do).
 		coopTable := buildcfg.Experiment.WasmCoopThreads
-		coopRealloc := (coopTable && ctxt.BuildMode == ld.BuildModeExe) ||
-			(buildcfg.GOOS == "wasip3" && !exportsCabiRealloc(ldr))
+		coopRealloc := coopTable && ctxt.BuildMode == ld.BuildModeExe && buildcfg.GOOS == "wasip1"
+		runtimeRealloc := buildcfg.GOOS == "wasip3" && !exportsCabiRealloc(ldr)
 		if coopTable {
 			numExports++
 		}
 		if coopRealloc {
 			numExports++
+		}
+		for _, s := range ldr.WasmExports {
+			if ldr.SymName(s) == "cabi_realloc_go" && !runtimeRealloc {
+				numExports--
+			}
 		}
 		writeUleb128(ctxt.Out, uint64(numExports)) // number of exports
 		var entry, entryExpName string
@@ -516,8 +521,15 @@ func writeExportSec(ctxt *ld.Link, ldr *loader.Loader, lenHostImports int) {
 		ctxt.Out.WriteByte(0x00)            // func export
 		writeUleb128(ctxt.Out, uint64(idx)) // funcidx
 		for _, s := range ldr.WasmExports {
+			name := ldr.SymName(s)
+			if name == "cabi_realloc_go" {
+				if !runtimeRealloc {
+					continue
+				}
+				name = "cabi_realloc"
+			}
 			idx := uint32(lenHostImports) + uint32(uint64(ldr.SymValue(s))>>16)
-			writeName(ctxt.Out, ldr.SymName(s))
+			writeName(ctxt.Out, name)
 			ctxt.Out.WriteByte(0x00)            // func export
 			writeUleb128(ctxt.Out, uint64(idx)) // funcidx
 		}

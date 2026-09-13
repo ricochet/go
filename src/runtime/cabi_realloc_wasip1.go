@@ -7,8 +7,9 @@
 package runtime
 
 // wasmCoopCabiRealloc (rt0_wasip1_wasm.s) is exported as cabi_realloc in
-// executables with GOEXPERIMENT=wasmcoopthreads or GOOS=wasip3, where the host
-// allocates through it to lower lists (e.g. the program arguments). The
+// GOOS=wasip1 executables with GOEXPERIMENT=wasmcoopthreads, where the host
+// allocates through it to lower lists. (GOOS=wasip3 modules export
+// cabiRealloc instead; see cabi_wasip3.go.) The
 // preview1 component adapter allocates its global state through it before it
 // calls _start, so it cannot be a //go:wasmexport function (those require an
 // initialized runtime). Without it, wit-component synthesizes a realloc that

@@ -462,24 +462,28 @@ func syscall_wasip3AwaitCall(status uint32) {
 	p3AwaitCall(status)
 }
 
-// Memory that the host allocates with cabi_realloc to pass strings and lists
-// to the syscall package is only needed until the syscall package has copied
-// them out. The syscall package holds the allocator around every import call
-// that may allocate, and when no call holds it any longer, the allocator
-// rewinds to where it was when the first of them started.
+// Memory that the host allocates with cabi_realloc (see cabi_wasip3.go) to
+// pass strings and lists to the syscall package is only needed until the
+// syscall package has copied them out. The syscall package holds the
+// allocator around every import call that may allocate, and when no call
+// holds it any longer, the allocator reuses the memory: it rewinds to where it
+// was when the first of them started, or if it started a new chunk meanwhile,
+// to the start of that chunk.
 //
-// This relies on nothing else keeping memory from cabi_realloc, which holds for
-// executables, where the runtime is the only user.
+// This relies on nothing else keeping memory from the allocator's chunks,
+// which holds, since the heap is used for allocations while nothing holds the
+// allocator in a c-shared module, and only during initialization in an
+// executable.
 var p3Cabi struct {
-	holds     int32
-	next, end uintptr
+	holds       int32
+	next, chunk uintptr
 }
 
 //go:linkname syscall_wasip3CabiHold syscall.wasip3CabiHold
 //go:nosplit
 func syscall_wasip3CabiHold() {
 	if p3Cabi.holds == 0 {
-		p3Cabi.next, p3Cabi.end = cabiNext, cabiEnd
+		p3Cabi.next, p3Cabi.chunk = cabiNext, cabiChunk
 	}
 	p3Cabi.holds++
 }
@@ -540,8 +544,11 @@ func http_wasip3SubtaskDrop(subtask uint32) {
 func syscall_wasip3CabiRelease() {
 	p3Cabi.holds--
 	if p3Cabi.holds == 0 {
-		// If the allocator moved on to a new chunk meanwhile, the new chunk
-		// is abandoned.
-		cabiNext, cabiEnd = p3Cabi.next, p3Cabi.end
+		if cabiChunk == p3Cabi.chunk {
+			cabiNext = p3Cabi.next
+		} else {
+			// Reuse the new chunk, abandoning the earlier ones.
+			cabiNext = cabiChunk
+		}
 	}
 }

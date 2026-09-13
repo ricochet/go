@@ -54,6 +54,14 @@ func wasip3AsyncExportStart() uint32 {
 	set := wasip3PollNewSet()
 	// Goroutines belong to the task that is current when they start.
 	wasip3PollSetCurrent(set)
+	// The call's parameters stay valid until the function returns (see
+	// wasip3AsyncExportReturned), after the call does.
+	for i := range p3Tasks.tasks {
+		if t := &p3Tasks.tasks[i]; t.set == set {
+			t.cabiArena = p3CabiCall
+			p3CabiCall = p3Arena{}
+		}
+	}
 	return set
 }
 
@@ -63,6 +71,10 @@ func wasip3AsyncExportReturned(set uint32) {
 	for i := range p3Tasks.tasks {
 		if t := &p3Tasks.tasks[i]; t.set == set {
 			t.returned = true
+			// The task may only exit after other goroutines are done
+			// with its waitables, but the parameters are no longer
+			// needed.
+			t.cabiArena.free()
 		}
 	}
 	// This may happen while another task runs; make sure the host calls this

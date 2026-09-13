@@ -14,13 +14,11 @@
 #endif
 #endif
 
-// Executables export cabi_realloc with GOEXPERIMENT=wasmcoopthreads, and
-// GOOS=wasip3 modules do (see cabi_realloc_wasip1.go).
+// GOOS=wasip1 executables export cabi_realloc with
+// GOEXPERIMENT=wasmcoopthreads (see cabi_realloc_wasip1.go). GOOS=wasip3
+// modules export a Go function instead (see cabi_wasip3.go).
 #ifdef GOEXPERIMENT_wasmcoopthreads
-#define WASM_CABI_REALLOC
-#endif
-#ifdef GOOS_wasip3
-#ifndef WASM_CABI_REALLOC
+#ifndef GOOS_wasip3
 #define WASM_CABI_REALLOC
 #endif
 #endif
@@ -49,12 +47,6 @@ TEXT _rt0_wasm_wasip1(SB),NOSPLIT,$0
 	Return
 
 TEXT _rt0_wasm_wasip1_lib(SB),NOSPLIT,$0
-#ifdef GOOS_wasip3
-	// c-shared modules export cabi_realloc too, unless they export their
-	// own (see cmd/link/internal/wasm.writeExportSec).
-	I64Const $runtime·wasmCoopCabiRealloc(SB)
-	Drop
-#endif
 #ifdef GOEXPERIMENT_wasmcoopthreads
 #ifdef GOEXPERIMENT_wasmstackful
 	// _initialize runs at component instantiation, where Component Model

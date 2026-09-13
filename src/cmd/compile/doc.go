@@ -355,6 +355,11 @@ The compiler exports it with the callback ABI, as ``[async-lift]name'' and
 ``[callback][async-lift]name'', and passes the function's result to the call's
 task.return. Other exports are synchronous, and must not block.
 
+The memory that the host passes strings and lists in, which the host
+allocates with the module's cabi_realloc, is only valid until the exported
+function returns: a function that keeps a string parameter must copy it (for
+example with strings.Clone).
+
 For both go:wasmimport and go:wasmexport,
 the types of parameters and return values to the Go function are translated to
 Wasm according to the following table:

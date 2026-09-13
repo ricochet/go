@@ -160,6 +160,8 @@ var (
 	coopStartMain         *obj.LSym
 	goexit                *obj.LSym
 	coopIdleSP            *obj.LSym
+	exportEnter           *obj.LSym
+	exportExit            *obj.LSym
 )
 
 // stackful reports whether GOEXPERIMENT=wasmstackful is in effect: calls are
@@ -268,6 +270,10 @@ func instinit(ctxt *obj.Link) {
 		coopStartMain = ctxt.Lookup("runtime.wasmCoopStartMain")
 		goexit = ctxt.LookupABI("runtime.goexit", obj.ABI0)
 		coopIdleSP = ctxt.Lookup("runtime.coopIdleSP")
+	}
+	if buildcfg.GOOS == "wasip3" {
+		exportEnter = ctxt.LookupABI("runtime.wasip3ExportEnter", obj.ABIInternal)
+		exportExit = ctxt.LookupABI("runtime.wasip3ExportExit", obj.ABIInternal)
 	}
 }
 
@@ -1316,6 +1322,13 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 		}
 	}
 
+	// On wasip3, the heap memory that cabi_realloc allocated for the
+	// parameters stays alive during the call (see runtime/cabi_wasip3.go).
+	exportHooks := buildcfg.GOOS == "wasip3" && !onSystemStack
+	if exportHooks {
+		p = appendp(p, ACALLNORESUME, obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: exportEnter})
+	}
+
 	// Call the Go function.
 	// XXX maybe use ACALL and let later phase expand? But we don't use PC_B. Maybe we should?
 	// Go calling convention expects we push a return PC before call.
@@ -1357,6 +1370,10 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 	p = appendp(p, AI32WrapI64)
 	p = appendp(p, ACall, obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: wasm_pc_f_loop_export})
 	p = appendp(p, AEnd)
+
+	if exportHooks {
+		p = appendp(p, ACALLNORESUME, obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: exportExit})
+	}
 
 	if coopEntry {
 		p = coopAddActive(p, appendp, obj.Addr{Type: obj.TYPE_ADDR, Name: obj.NAME_EXTERN, Sym: coopActive}, -1)

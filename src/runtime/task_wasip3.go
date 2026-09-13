@@ -62,6 +62,10 @@ type p3Task struct {
 	// returned reports whether the goroutine of an async export returned
 	// its result (see export_wasip3.go).
 	returned bool
+
+	// cabiArena holds the parameters of the async export call that started
+	// the task (see cabi_wasip3.go).
+	cabiArena p3Arena
 }
 
 var p3Tasks struct {
@@ -166,6 +170,7 @@ func p3TaskExit() {
 		p3TaskFutureCancelRead(t.notifyReadable)
 		p3TaskFutureDropReadable(t.notifyReadable)
 		p3TaskFutureDropWritable(t.notifyWritable)
+		t.cabiArena.free()
 		// The task's set is dropped once it exits (by the task's callback).
 		if p3Poll.set == t.set {
 			p3Poll.set = 0
