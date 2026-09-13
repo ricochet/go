@@ -28,6 +28,11 @@ func gopanic(interface{})
 func gorecover() interface{}
 func goschedguarded()
 
+// Async exports on GOOS=wasip3 (see ssagen.GenWasmAsyncExports).
+func wasip3AsyncExportStart() uint32
+func wasip3AsyncExportReturned(set uint32)
+func wasip3AsyncExportCallback(set, event, handle, payload uint32) uint32
+
 // Note: these declarations are just for wasm port.
 // Other ports call assembly stubs instead.
 func goPanicIndex(x int, y int)

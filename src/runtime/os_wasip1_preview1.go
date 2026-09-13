@@ -14,6 +14,9 @@ import "unsafe"
 //go:wasmimport wasi_snapshot_preview1 proc_exit
 func exit(code int32)
 
+// wasip3BeforeIdle is for async exports on GOOS=wasip3 (see export_wasip3.go).
+func wasip3BeforeIdle() *g { return nil }
+
 //go:wasmimport wasi_snapshot_preview1 args_get
 //go:noescape
 func args_get(argv *uintptr32, argvBuf *byte) errno

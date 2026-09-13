@@ -277,6 +277,10 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 	// Build init task, if needed.
 	pkginit.MakeTask()
 
+	// Generate the exports of async wasmexport functions, which
+	// need ABI wrappers.
+	ssagen.GenWasmAsyncExports()
+
 	// Generate ABI wrappers. Must happen before escape analysis
 	// and doesn't benefit from dead-coding or inlining.
 	symABIs.GenABIWrappers()

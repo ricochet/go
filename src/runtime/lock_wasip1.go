@@ -141,6 +141,9 @@ func beforeIdle(now int64, pollUntil int64, netWaiters bool) (*g, bool) {
 	if pollUntil != 0 {
 		idleTimer = max(pollUntil-now, 0)
 	}
+	if gp := wasip3BeforeIdle(); gp != nil {
+		return gp, false
+	}
 	// On GOOS=wasip3, goroutines waiting for Component Model events are
 	// among netWaiters, and the idle callback of a task returns to the host
 	// to wait for their events.

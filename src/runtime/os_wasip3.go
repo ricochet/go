@@ -23,6 +23,11 @@ import (
 // (see p3Await), and when no goroutine is runnable the scheduler waits for
 // any stream event or timer in netpoll.
 //
+// A c-shared module (a reactor) is initialized by _initialize and exports its
+// //go:wasmexport functions. Async ones (named [async]name) run as tasks that
+// return to the host whenever no goroutine can run (see export_wasip3.go), as
+// do those of Component Model bindings (see task_wasip3.go).
+//
 // By default, goroutines run on Component Model threads
 // (GOEXPERIMENT=wasmcoopthreads, see coop_wasip1.go), with the experiments
 // that build on them; GOEXPERIMENT=nowasmcoopthreads turns them all off.

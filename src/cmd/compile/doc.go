@@ -341,6 +341,20 @@ For example,
 
 make Go function hWasm available outside this WebAssembly module as h.
 
+On GOOS=wasip3, where a module built with -buildmode=c-shared is a component
+of the WebAssembly Component Model, the names of exports are those of the
+Component Model's canonical ABI. An export named ``[async]name'' (or
+``[async]interface#name'') is an async function of the component's world, whose
+Go function may block, for example on I/O, timers or channels, and may be
+called again while an earlier call is blocked:
+
+	//go:wasmexport [async]fetch
+	func fetch(id int32) int32 { ... }
+
+The compiler exports it with the callback ABI, as ``[async-lift]name'' and
+``[callback][async-lift]name'', and passes the function's result to the call's
+task.return. Other exports are synchronous, and must not block.
+
 For both go:wasmimport and go:wasmexport,
 the types of parameters and return values to the Go function are translated to
 Wasm according to the following table:

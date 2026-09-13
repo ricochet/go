@@ -58,6 +58,10 @@ type p3Task struct {
 	notifyReadable uint32
 	notifyWritable uint32
 	notified       bool
+
+	// returned reports whether the goroutine of an async export returned
+	// its result (see export_wasip3.go).
+	returned bool
 }
 
 var p3Tasks struct {
