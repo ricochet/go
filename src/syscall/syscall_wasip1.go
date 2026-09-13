@@ -463,10 +463,6 @@ const (
 	clockThreadCPUTimeID
 )
 
-//go:wasmimport wasi_snapshot_preview1 clock_time_get
-//go:noescape
-func clock_time_get(id clockid, precision timestamp, time *timestamp) Errno
-
 func SetNonblock(fd int, nonblocking bool) error {
 	flags, err := fd_fdstat_get_flags(fd)
 	if err != nil {

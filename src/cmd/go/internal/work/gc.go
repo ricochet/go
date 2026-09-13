@@ -362,6 +362,10 @@ func asmArgs(a *Action, p *load.Package) []any {
 	inc := filepath.Join(cfg.GOROOT, "pkg", "include")
 	pkgpath := pkgPath(a)
 	args := []any{cfg.BuildToolexec, base.Tool("asm"), "-p", pkgpath, "-trimpath", a.trimpath(), "-I", a.Objdir, "-I", inc, "-D", "GOOS_" + cfg.Goos, "-D", "GOARCH_" + cfg.Goarch, forcedAsmflags, p.Internal.Asmflags}
+	if cfg.Goos == "wasip3" {
+		// GOOS=wasip3 implies the wasip1 build tag; assembly files test both.
+		args = append(args, "-D", "GOOS_wasip1")
+	}
 	if p.ImportPath == "runtime" && cfg.Goarch == "386" {
 		for _, arg := range forcedAsmflags {
 			if arg == "-dynlink" {

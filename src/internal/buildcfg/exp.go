@@ -142,8 +142,17 @@ func ParseGOEXPERIMENT(goos, goarch, goexp string) (*ExperimentFlags, error) {
 		flags.RegabiWrappers = true
 		flags.RegabiArgs = true
 	}
-	// regabi is only supported on amd64, arm64, loong64, riscv64, s390x, ppc64 and ppc64le.
-	if !regabiSupported {
+	// On wasip1, GOEXPERIMENT=wasmregabi (which builds on wasmcoopthreads,
+	// wasmstackful and wasmspparam) turns on the register ABI.
+	wasmRegABI := (goos == "wasip1" || goos == "wasip3") && goarch == "wasm" && flags.WasmRegABI &&
+		flags.WasmCoopThreads && flags.WasmStackful && flags.WasmSPParam
+	if wasmRegABI {
+		flags.RegabiWrappers = true
+		flags.RegabiArgs = true
+	}
+	// regabi is only supported on amd64, arm64, loong64, riscv64, s390x, ppc64 and ppc64le
+	// (and wasm with GOEXPERIMENT=wasmregabi).
+	if !regabiSupported && !wasmRegABI {
 		flags.RegabiWrappers = false
 		flags.RegabiArgs = false
 	}

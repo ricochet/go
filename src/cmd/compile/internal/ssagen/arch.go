@@ -36,6 +36,10 @@ type ArchInfo struct {
 
 	Ginsnop func(*objw.Progs) *obj.Prog
 
+	// SSAPrepareBlocks, if non-nil, is called before any Progs are emitted
+	// for a function's blocks. It may reorder f.Blocks and set s.ArchData.
+	SSAPrepareBlocks func(*State, *ssa.Func)
+
 	// SSAMarkMoves marks any MOVXconst ops that need to avoid clobbering flags.
 	SSAMarkMoves func(*State, *ssa.Block)
 

@@ -39,6 +39,7 @@ const (
 	sectionElement  = 9
 	sectionCode     = 10
 	sectionData     = 11
+	sectionTag      = 13
 )
 
 func gentext(ctxt *ld.Link, ldr *loader.Loader) {
@@ -63,32 +64,35 @@ func readWasmImport(ldr *loader.Loader, s loader.Sym) obj.WasmImport {
 }
 
 var wasmFuncTypes = map[string]*wasmFuncType{
-	"_rt0_wasm_js":            {Params: []byte{}},                                         //
-	"_rt0_wasm_wasip1":        {Params: []byte{}},                                         //
-	"_rt0_wasm_wasip1_lib":    {Params: []byte{}},                                         //
-	"wasm_export__start":      {},                                                         //
-	"wasm_export_run":         {Params: []byte{I32, I32}},                                 // argc, argv
-	"wasm_export_resume":      {Params: []byte{}},                                         //
-	"wasm_export_getsp":       {Results: []byte{I32}},                                     // sp
-	"wasm_pc_f_loop":          {Params: []byte{}},                                         //
-	"wasm_pc_f_loop_export":   {Params: []byte{I32}},                                      // pc_f
-	"runtime.wasmDiv":         {Params: []byte{I64, I64}, Results: []byte{I64}},           // x, y -> x/y
-	"runtime.wasmTruncS":      {Params: []byte{F64}, Results: []byte{I64}},                // x -> int(x)
-	"runtime.wasmTruncU":      {Params: []byte{F64}, Results: []byte{I64}},                // x -> uint(x)
-	"gcWriteBarrier":          {Params: []byte{I64}, Results: []byte{I64}},                // #bytes -> bufptr
-	"runtime.gcWriteBarrier1": {Results: []byte{I64}},                                     // -> bufptr
-	"runtime.gcWriteBarrier2": {Results: []byte{I64}},                                     // -> bufptr
-	"runtime.gcWriteBarrier3": {Results: []byte{I64}},                                     // -> bufptr
-	"runtime.gcWriteBarrier4": {Results: []byte{I64}},                                     // -> bufptr
-	"runtime.gcWriteBarrier5": {Results: []byte{I64}},                                     // -> bufptr
-	"runtime.gcWriteBarrier6": {Results: []byte{I64}},                                     // -> bufptr
-	"runtime.gcWriteBarrier7": {Results: []byte{I64}},                                     // -> bufptr
-	"runtime.gcWriteBarrier8": {Results: []byte{I64}},                                     // -> bufptr
-	"runtime.notInitialized":  {},                                                         //
-	"cmpbody":                 {Params: []byte{I64, I64, I64, I64}, Results: []byte{I64}}, // a, alen, b, blen -> -1/0/1
-	"memeqbody":               {Params: []byte{I64, I64, I64}, Results: []byte{I64}},      // a, b, len -> 0/1
-	"memcmp":                  {Params: []byte{I32, I32, I32}, Results: []byte{I32}},      // a, b, len -> <0/0/>0
-	"memchr":                  {Params: []byte{I32, I32, I32}, Results: []byte{I32}},      // s, c, len -> index
+	"_rt0_wasm_js":                {Params: []byte{}},                                         //
+	"_rt0_wasm_wasip1":            {Params: []byte{}},                                         //
+	"_rt0_wasm_wasip1_lib":        {Params: []byte{}},                                         //
+	"wasm_export__start":          {},                                                         //
+	"wasm_export_run":             {Params: []byte{I32, I32}},                                 // argc, argv
+	"wasm_export_resume":          {Params: []byte{}},                                         //
+	"wasm_export_getsp":           {Results: []byte{I32}},                                     // sp
+	"wasm_pc_f_loop":              {Params: []byte{}},                                         //
+	"wasm_pc_f_loop_export":       {Params: []byte{I32}},                                      // pc_f
+	"runtime.wasmDiv":             {Params: []byte{I64, I64}, Results: []byte{I64}},           // x, y -> x/y
+	"runtime.wasmTruncS":          {Params: []byte{F64}, Results: []byte{I64}},                // x -> int(x)
+	"runtime.wasmTruncU":          {Params: []byte{F64}, Results: []byte{I64}},                // x -> uint(x)
+	"gcWriteBarrier":              {Params: []byte{I64}, Results: []byte{I64}},                // #bytes -> bufptr
+	"runtime.gcWriteBarrier1":     {Results: []byte{I64}},                                     // -> bufptr
+	"runtime.gcWriteBarrier2":     {Results: []byte{I64}},                                     // -> bufptr
+	"runtime.gcWriteBarrier3":     {Results: []byte{I64}},                                     // -> bufptr
+	"runtime.gcWriteBarrier4":     {Results: []byte{I64}},                                     // -> bufptr
+	"runtime.gcWriteBarrier5":     {Results: []byte{I64}},                                     // -> bufptr
+	"runtime.gcWriteBarrier6":     {Results: []byte{I64}},                                     // -> bufptr
+	"runtime.gcWriteBarrier7":     {Results: []byte{I64}},                                     // -> bufptr
+	"runtime.gcWriteBarrier8":     {Results: []byte{I64}},                                     // -> bufptr
+	"runtime.notInitialized":      {},                                                         //
+	"cmpbody":                     {Params: []byte{I64, I64, I64, I64}, Results: []byte{I64}}, // a, alen, b, blen -> -1/0/1
+	"memeqbody":                   {Params: []byte{I64, I64, I64}, Results: []byte{I64}},      // a, b, len -> 0/1
+	"memcmp":                      {Params: []byte{I32, I32, I32}, Results: []byte{I32}},      // a, b, len -> <0/0/>0
+	"memchr":                      {Params: []byte{I32, I32, I32}, Results: []byte{I32}},      // s, c, len -> index
+	"runtime.wasmCoopStartMain":   {Params: []byte{}},
+	"runtime.wasmCoopThreadStart": {Params: []byte{I32}},                                      // Component Model thread start function (GOEXPERIMENT=wasmcoopthreads)
+	"runtime.wasmCoopCabiRealloc": {Params: []byte{I32, I32, I32, I32}, Results: []byte{I32}}, // old, oldSize, align, newSize -> ptr (GOEXPERIMENT=wasmcoopthreads)
 }
 
 // pcBase is the base value for PCs on Wasm.
@@ -149,6 +153,17 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
 		// 1 if the stack needs to be unwound.
 		{Params: []byte{I32}, Results: []byte{I32}},
 	}
+	if (buildcfg.GOOS == "wasip1" || buildcfg.GOOS == "wasip3") && buildcfg.Experiment.WasmCoopThreads && buildcfg.Experiment.WasmStackful && buildcfg.Experiment.WasmSPParam {
+		// With GOEXPERIMENT=wasmspparam, SP is passed in (instead of
+		// PC_B), and returned with the unwind flag in bit 0 (see
+		// cmd/internal/obj/wasm).
+		types[0] = &wasmFuncType{Params: []byte{I32}, Results: []byte{I32}}
+		if buildcfg.Experiment.RegabiArgs {
+			// GOEXPERIMENT=wasmregabi: plus the integer argument/result
+			// registers R0-R2.
+			types[0] = &wasmFuncType{Params: []byte{I32, I64, I64, I64}, Results: []byte{I32, I64, I64, I64}}
+		}
+	}
 
 	// collect host imports (functions that get imported from the WebAssembly host, usually JavaScript)
 	// we store the import index of each imported function, so the R_WASMIMPORT relocation
@@ -187,6 +202,10 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
 		if ldr.SymName(fn) == "go:buildid" {
 			writeUleb128(wfn, 0) // number of sets of locals
 			writeI32Const(wfn, 0)
+			for range len(types[0].Results) - 1 {
+				wfn.WriteByte(0x42) // i64.const
+				writeSleb128(wfn, 0)
+			}
 			wfn.WriteByte(0x0b) // end
 			buildid = ldr.Data(fn)
 		} else {
@@ -243,11 +262,23 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
 		writeBuildID(ctxt, buildid)
 	}
 
+	// With GOEXPERIMENT=wasmstackful, runtime·gogo throws exception tag 0
+	// (which carries no values) to discard stale wasm frames; see
+	// cmd/internal/obj/wasm.
+	stackful := (buildcfg.GOOS == "wasip1" || buildcfg.GOOS == "wasip3") && buildcfg.Experiment.WasmCoopThreads && buildcfg.Experiment.WasmStackful
+	var tagType uint32
+	if stackful {
+		tagType = lookupType(&wasmFuncType{}, &types)
+	}
+
 	writeTypeSec(ctxt, types)
 	writeImportSec(ctxt, hostImports)
 	writeFunctionSec(ctxt, fns)
 	writeTableSec(ctxt, fns)
 	writeMemorySec(ctxt, ldr)
+	if stackful {
+		writeTagSec(ctxt, tagType)
+	}
 	writeGlobalSec(ctxt)
 	writeExportSec(ctxt, ldr, len(hostImports))
 	writeElementSec(ctxt, uint64(len(hostImports)), uint64(len(fns)))
@@ -377,6 +408,18 @@ func writeMemorySec(ctxt *ld.Link, ldr *loader.Loader) {
 	writeSecSize(ctxt, sizeOffset)
 }
 
+// writeTagSec writes the section that declares exception tags: a single tag
+// of the given function type.
+func writeTagSec(ctxt *ld.Link, typ uint32) {
+	sizeOffset := writeSecHeader(ctxt, sectionTag)
+
+	writeUleb128(ctxt.Out, 1) // number of tags
+	ctxt.Out.WriteByte(0x00)  // attribute: exception
+	writeUleb128(ctxt.Out, uint64(typ))
+
+	writeSecSize(ctxt, sizeOffset)
+}
+
 // writeGlobalSec writes the section that declares global variables.
 func writeGlobalSec(ctxt *ld.Link) {
 	sizeOffset := writeSecHeader(ctxt, sectionGlobal)
@@ -416,13 +459,36 @@ func writeExportSec(ctxt *ld.Link, ldr *loader.Loader, lenHostImports int) {
 	sizeOffset := writeSecHeader(ctxt, sectionExport)
 
 	switch buildcfg.GOOS {
-	case "wasip1":
-		writeUleb128(ctxt.Out, uint64(2+len(ldr.WasmExports))) // number of exports
+	case "wasip1", "wasip3":
+		numExports := 2 + len(ldr.WasmExports)
+		// With GOEXPERIMENT=wasmcoopthreads, thread.new-indirect resolves
+		// its start function through the table exported under
+		// __indirect_function_table. An executable also exports
+		// cabi_realloc, through which the preview1 command adapter allocates
+		// before _start; c-shared modules get cabi_realloc from their
+		// bindings, and the reactor adapter only calls it after _initialize.
+		// A GOOS=wasip3 executable lowers lists (e.g. its arguments) from the
+		// host, which calls cabi_realloc.
+		coopTable := buildcfg.Experiment.WasmCoopThreads
+		coopRealloc := (coopTable || buildcfg.GOOS == "wasip3") && ctxt.BuildMode == ld.BuildModeExe
+		if coopTable {
+			numExports++
+		}
+		if coopRealloc {
+			numExports++
+		}
+		writeUleb128(ctxt.Out, uint64(numExports)) // number of exports
 		var entry, entryExpName string
 		switch ctxt.BuildMode {
 		case ld.BuildModeExe:
 			entry = "_rt0_wasm_wasip1"
 			entryExpName = "_start"
+			if buildcfg.GOOS == "wasip3" {
+				// The wasi:cli/command@0.3.0 entry point, lifted as a
+				// stackful async function so that it may block (e.g. in
+				// time.Sleep). See runtime/os_wasip3.go.
+				entryExpName = "[async-lift-stackful]wasi:cli/run@0.3.0#run"
+			}
 		case ld.BuildModeCShared:
 			entry = "_rt0_wasm_wasip1_lib"
 			entryExpName = "_initialize"
@@ -444,6 +510,20 @@ func writeExportSec(ctxt *ld.Link, ldr *loader.Loader, lenHostImports int) {
 		writeName(ctxt.Out, "memory") // memory in wasi
 		ctxt.Out.WriteByte(0x02)      // mem export
 		writeUleb128(ctxt.Out, 0)     // memidx
+		if coopRealloc {
+			s := ldr.Lookup("runtime.wasmCoopCabiRealloc", 0)
+			if s == 0 {
+				ld.Errorf("export symbol runtime.wasmCoopCabiRealloc not defined")
+			}
+			writeName(ctxt.Out, "cabi_realloc")
+			ctxt.Out.WriteByte(0x00) // func export
+			writeUleb128(ctxt.Out, uint64(uint32(lenHostImports)+uint32(uint64(ldr.SymValue(s))>>16)))
+		}
+		if coopTable {
+			writeName(ctxt.Out, "__indirect_function_table")
+			ctxt.Out.WriteByte(0x01)  // table export
+			writeUleb128(ctxt.Out, 0) // tableidx
+		}
 	case "js":
 		writeUleb128(ctxt.Out, uint64(4+len(ldr.WasmExports))) // number of exports
 		for _, name := range []string{"run", "resume", "getsp"} {

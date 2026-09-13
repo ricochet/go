@@ -5,6 +5,17 @@
 #include "go_asm.h"
 #include "textflag.h"
 
+#ifdef GOEXPERIMENT_regabiargs
+// memequal(p, q unsafe.Pointer, size uintptr) bool
+// With GOEXPERIMENT=wasmregabi, the arguments are in R0-R2 and the result in R0.
+TEXT runtime·memequal<ABIInternal>(SB), NOSPLIT, $0-25
+	Get R0
+	Get R1
+	Get R2
+	Call memeqbody<>(SB)
+	Set R0
+	RET
+#else
 // memequal(p, q unsafe.Pointer, size uintptr) bool
 TEXT runtime·memequal(SB), NOSPLIT, $0-25
 	Get SP
@@ -14,6 +25,7 @@ TEXT runtime·memequal(SB), NOSPLIT, $0-25
 	Call memeqbody<>(SB)
 	I64Store8 ret+24(FP)
 	RET
+#endif
 
 // memequal_varlen(a, b unsafe.Pointer) bool
 TEXT runtime·memequal_varlen(SB), NOSPLIT, $0-17

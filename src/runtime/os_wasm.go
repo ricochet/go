@@ -5,6 +5,7 @@
 package runtime
 
 import (
+	"internal/goexperiment"
 	"internal/runtime/atomic"
 	"unsafe"
 )
@@ -12,8 +13,13 @@ import (
 func osinit() {
 	// https://webassembly.github.io/spec/core/exec/runtime.html#memory-instances
 	physPageSize = 64 * 1024
-	initBloc()
-	blocMax = uintptr(currentMemory()) * physPageSize // record the initial linear memory size
+	// With GOEXPERIMENT=wasmcoopthreads, the component adapter may already
+	// have allocated through cabi_realloc, which sets the break to the end of
+	// memory before the runtime starts. Keep it so those pages stay reserved.
+	if !goexperiment.WasmCoopThreads || blocMax == 0 {
+		initBloc()
+		blocMax = uintptr(currentMemory()) * physPageSize // record the initial linear memory size
+	}
 	numCPUStartup = getCPUCount()
 	getg().m.procid = 2
 }

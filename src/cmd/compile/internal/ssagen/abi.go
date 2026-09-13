@@ -158,6 +158,18 @@ func (s *SymABIs) GenABIWrappers() {
 			fn.ABI = defABI
 		}
 
+		if fn.WasmImport != nil && buildcfg.Experiment.RegabiArgs {
+			// cmd/internal/obj/wasm generates the body of a wasmimport
+			// function, which reads its arguments from the stack, as in
+			// ABI0. Go code calls it through an ABI wrapper.
+			fn.ABI = obj.ABI0
+		}
+		if fn.WasmExport != nil && buildcfg.Experiment.RegabiArgs {
+			// The wasmexport wrapper passes arguments on the stack, so it
+			// calls the ABI0 wrapper of an ABIInternal function.
+			fn.ABIRefs.Set(obj.ABI0, true)
+		}
+
 		if fn.Pragma&ir.CgoUnsafeArgs != 0 {
 			// CgoUnsafeArgs indicates the function (or its callee) uses
 			// offsets to dispatch arguments, which currently using ABI0
@@ -588,6 +600,10 @@ func setupWasmImport(f *ir.Func) {
 func setupWasmExport(f, wrapped *ir.Func) {
 	we := obj.WasmExport{
 		WrappedSym: wrapped.LSym,
+	}
+	if wrapped.ABI != obj.ABI0 && buildcfg.Experiment.RegabiArgs {
+		// See the ABI0 reference added in (*SymABIs).GenABIWrappers.
+		we.WrappedSym = wrapped.Nname.Sym().LinksymABI(obj.ABI0)
 	}
 	abiConfig := AbiForBodylessFuncStackMap(wrapped)
 	abiInfo := abiConfig.ABIAnalyzeFuncType(wrapped.Type())

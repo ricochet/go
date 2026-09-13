@@ -107,11 +107,41 @@ func notetsleepg(n *note, ns int64) bool {
 	}
 }
 
-func beforeIdle(int64, int64) (*g, bool) {
-	return nil, false
+var onIdle = func() bool {
+	return false
+}
+
+// wasiOnIdle registers a callback that the scheduler calls when no goroutine
+// is runnable. If it returns true, the scheduler looks for runnable goroutines
+// again. It is used (via linkname) by go.bytecodealliance.org/pkg/wit/async to
+// return control to the Component Model host only after all goroutines have
+// made as much progress as they can.
+//
+// From https://github.com/golang/go/pull/76775.
+func wasiOnIdle(callback func() bool) {
+	onIdle = callback
+}
+
+// idleTimer is the result of wasiIdleTimer.
+var idleTimer int64 = -1
+
+// wasiIdleTimer reports how many nanoseconds after the most recent point at
+// which no goroutine was runnable the earliest pending timer fires, or -1 if
+// no timer was pending then. A wasiOnIdle callback that returns control to
+// the host must arrange for the host to call back into Go by that time;
+// otherwise goroutines waiting on timers (time.Sleep, time.After, context
+// deadlines, ...) never resume. It is used (via linkname) by
+// go.bytecodealliance.org/pkg/wit/async.
+func wasiIdleTimer() int64 {
+	return idleTimer
+}
+
+func beforeIdle(now int64, pollUntil int64, netWaiters bool) (*g, bool) {
+	idleTimer = -1
+	if pollUntil != 0 {
+		idleTimer = max(pollUntil-now, 0)
+	}
+	return nil, !netWaiters && onIdle()
 }
 
 func checkTimeouts() {}
-
-//go:wasmimport wasi_snapshot_preview1 sched_yield
-func sched_yield() errno

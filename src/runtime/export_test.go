@@ -596,6 +596,8 @@ type Sudog = sudog
 
 type XRegPerG = xRegPerG
 
+type GCoop = gCoop
+
 func Getg() *G {
 	return getg()
 }

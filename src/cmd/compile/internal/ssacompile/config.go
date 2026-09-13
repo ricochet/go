@@ -29,6 +29,7 @@ import (
 	"cmd/compile/internal/ssa/rewrite/wasm"
 	"cmd/compile/internal/ssa/ssaop"
 	"cmd/internal/obj"
+	"internal/buildcfg"
 )
 
 func NewConfig(softFloat bool) *ssa.Config {
@@ -239,6 +240,10 @@ func newConfig(arch string, types ssa.Types, ctxt *obj.Link, optimize, softfloat
 		c.HasGReg = true
 		c.UnalignedOK = true
 		c.HaveCondSelect = true
+		if buildcfg.Experiment.RegabiArgs {
+			// GOEXPERIMENT=wasmregabi: R0-R2 (see internal/abi/abi_wasm.go).
+			c.IntParamRegs = []int8{0, 1, 2}
+		}
 	default:
 		ctxt.Diag("arch %s not implemented", arch)
 	}

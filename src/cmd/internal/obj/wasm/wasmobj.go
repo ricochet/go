@@ -12,8 +12,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"internal/abi"
+	"internal/buildcfg"
 	"io"
 	"math"
+	"strings"
 )
 
 var Register = map[string]int16{
@@ -94,6 +96,8 @@ var Register = map[string]int16{
 	"V14": REG_V14,
 	"V15": REG_V15,
 
+	"FDEPTH": REG_FDEPTH,
+
 	"PC_B": REG_PC_B,
 }
 
@@ -131,6 +135,7 @@ var unaryDst = map[obj.As]bool{
 	AI64Store16:   true,
 	AI64Store32:   true,
 	ACALLNORESUME: true,
+	ACALLRESULT:   true,
 }
 
 var Linkwasm = obj.LinkArch{
@@ -147,11 +152,90 @@ var (
 	sigpanic              *obj.LSym
 	wasm_pc_f_loop_export *obj.LSym
 	runtimeNotInitialized *obj.LSym
+	coopResumePC          *obj.LSym
+	coopResumeSP          *obj.LSym
+	coopActive            *obj.LSym
+	coopExportEnter       *obj.LSym
+	coopMainStarted       *obj.LSym
+	coopStartMain         *obj.LSym
 )
+
+// stackful reports whether GOEXPERIMENT=wasmstackful is in effect: calls are
+// not resume points and goroutine switches do not unwind the wasm stack.
+func stackful() bool {
+	return (buildcfg.GOOS == "wasip1" || buildcfg.GOOS == "wasip3") && buildcfg.Experiment.WasmCoopThreads && buildcfg.Experiment.WasmStackful
+}
+
+// spParam reports whether GOEXPERIMENT=wasmspparam is in effect (together
+// with wasmstackful): functions that follow the Go ABI have the wasm type
+// (func (param $SP i32) (result i32)), where the result is the callee's final
+// SP with the unwind flag in bit 0 (SP is a multiple of 8). SP lives in the
+// local that the SP param occupies, and the SP that callers take from the
+// result differs from the SP passed in only if the stack was switched or
+// moved. PC_B is a local that is 0 on entry: without resumable functions, a
+// function is never entered at a resume point, except runtime·goexit, whose
+// first instruction is a NOP anyway. (Wasmtime is much faster with few
+// parameters and results.) The SP global is written only before
+// calls to functions that do not follow the Go ABI and may read it (host
+// imports, which may call back into exports, and the write barrier, which may
+// call wbBufFlush) and before exceptions thrown by assembly functions; code
+// that does not follow the Go ABI passes and takes it explicitly (see
+// wasm_pc_f_loop).
+func spParam() bool {
+	return stackful() && buildcfg.Experiment.WasmSPParam
+}
+
+// regABI reports whether GOEXPERIMENT=wasmregabi is in effect (together with
+// wasmspparam): the register ABI is enabled, with the integer argument and
+// result registers R0-R2 (see internal/abi/abi_wasm.go). Functions that
+// follow the Go ABI (ABIInternal or ABI0) have the wasm type
+// (func (param $SP i32) (param $R0 i64) (param $R1 i64) (param $R2 i64)
+// (result i32 i64 i64 i64)), with results SP|unwind, R0, R1 and R2. On arm64,
+// Wasmtime passes at most four parameters and results in native registers.
+func regABI() bool {
+	return spParam() && buildcfg.Experiment.RegabiArgs
+}
+
+// regABIArgs is the number of integer argument registers with
+// GOEXPERIMENT=wasmregabi.
+const regABIArgs = 3
+
+// spFree lists functions that do not follow the Go ABI and never read the SP
+// global, so callers need not write it first (GOEXPERIMENT=wasmspparam).
+var spFree = map[string]bool{
+	"runtime.wasmDiv":    true,
+	"runtime.wasmTruncS": true,
+	"runtime.wasmTruncU": true,
+	"cmpbody":            true,
+	"memeqbody":          true,
+	"memcmp":             true,
+	"memchr":             true,
+}
+
+// coopResumeTag is the index of the exception tag thrown by runtime·gogo
+// (GOEXPERIMENT=wasmstackful). The linker defines it as the only tag.
+const coopResumeTag = 0
+
+// panicStart is (*_panic).start, whose return runtime·recovery resumes when a
+// recovered panic would skip a pending Goexit.
+const panicStart = "runtime.(*_panic).start"
+
+// isRecoveryCall reports whether a call to sym makes the calling function a
+// place where runtime·recovery can resume (GOEXPERIMENT=wasmstackful).
+func isRecoveryCall(sym *obj.LSym) bool {
+	return sym.Name == "runtime.deferreturn" || sym.Name == panicStart
+}
 
 const (
 	/* mark flags */
 	WasmImport = 1 << 0
+	// rethrow marks a Throw that passes on an exception caught in a frame
+	// that is not the one being resumed; its SP is stale, so unlike other
+	// throws (GOEXPERIMENT=wasmspparam) it must not write the SP global.
+	rethrow = 1 << 1
+	// dropUnwind marks a call whose caller ignores the unwind result
+	// (GOEXPERIMENT=wasmspparam).
+	dropUnwind = 1 << 2
 )
 
 const (
@@ -168,6 +252,14 @@ func instinit(ctxt *obj.Link) {
 	sigpanic = ctxt.LookupABI("runtime.sigpanic", obj.ABIInternal)
 	wasm_pc_f_loop_export = ctxt.Lookup("wasm_pc_f_loop_export")
 	runtimeNotInitialized = ctxt.Lookup("runtime.notInitialized")
+	if stackful() {
+		coopResumePC = ctxt.Lookup("runtime.coopResumePC")
+		coopResumeSP = ctxt.Lookup("runtime.coopResumeSP")
+		coopActive = ctxt.Lookup("runtime.coopActive")
+		coopExportEnter = ctxt.LookupABI("runtime.wasmCoopExportEnter", obj.ABIInternal)
+		coopMainStarted = ctxt.Lookup("runtime.coopMainStarted")
+		coopStartMain = ctxt.Lookup("runtime.wasmCoopStartMain")
+	}
 }
 
 func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
@@ -221,6 +313,7 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		genWasmExportWrapper(s, appendp)
 	}
 
+	pPrologueEnd := s.Func().Text
 	if framesize > 0 && s.Func().WasmExport == nil { // genWasmExportWrapper has its own prologue generation
 		p := s.Func().Text
 		p = appendp(p, AGet, regAddr(REG_SP))
@@ -228,6 +321,36 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		p = appendp(p, AI32Sub)
 		p = appendp(p, ASet, regAddr(REG_SP))
 		p.Spadj = int32(framesize)
+		pPrologueEnd = p
+	}
+
+	// With GOEXPERIMENT=wasmstackful, panic recovery resumes a function in
+	// the middle, which (unlike the old unwind/rewind scheme) requires that
+	// frame to still be on the wasm stack. runtime·recovery gogos either to a
+	// function's (first) deferreturn call, or, when the recovery would skip
+	// a pending Goexit, back to the return from Goexit's (*_panic).start
+	// call. Such a function catches the exception thrown for gogo if the
+	// target is one of its recovery PCs at its own depth below stack.hi, and
+	// dispatches to that PC.
+	hasRecoveryTarget := false
+	if stackful() {
+		for p := s.Func().Text; p != nil; p = p.Link {
+			if p.As == obj.ACALL && p.To.Sym != nil && isRecoveryCall(p.To.Sym) {
+				hasRecoveryTarget = true
+				break
+			}
+		}
+	}
+	if hasRecoveryTarget {
+		// FDEPTH = g.stack.hi - SP
+		p := pPrologueEnd
+		p = appendp(p, AGet, regAddr(REGG))
+		p = appendp(p, AI32WrapI64)
+		p = appendp(p, AI64Load, constAddr(1*int64(ctxt.Arch.PtrSize))) // G.stack.hi
+		p = appendp(p, AGet, regAddr(REG_SP))
+		p = appendp(p, AI64ExtendI32U)
+		p = appendp(p, AI64Sub)
+		p = appendp(p, ASet, regAddr(REG_FDEPTH))
 	}
 
 	// If the framesize is 0, then imply nosplit because it's a specially
@@ -289,7 +412,7 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		prevBase := base
 		base = ctxt.PosTable.Pos(p.Pos).Base()
 		switch p.As {
-		case ABlock, ALoop, AIf:
+		case ABlock, ALoop, AIf, ATryTable:
 			explicitBlockDepth++
 
 		case AEnd:
@@ -311,10 +434,17 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			pc++
 
 		case obj.ACALL:
-			if explicitBlockDepth != 0 {
+			resume := !stackful() || (p.To.Sym != nil && p.To.Sym.Name == panicStart)
+			if explicitBlockDepth != 0 && resume {
+				// With GOEXPERIMENT=wasmstackful, calls may be nested in
+				// structured control flow (see cmd/compile/internal/wasm).
 				panic("CALL can only be used on toplevel, try CALLNORESUME instead")
 			}
-			appendp(p, ARESUMEPOINT)
+			if resume {
+				// With GOEXPERIMENT=wasmstackful, only the return from
+				// (*_panic).start is ever resumed (by recovery).
+				appendp(p, ARESUMEPOINT)
+			}
 		}
 
 		p.Pc = pc
@@ -323,7 +453,9 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		// more often to avoid bloat of the BrTable instruction.
 		// The "base != prevBase" condition detects inlined instructions. They are an
 		// implicit call, so entering and leaving this section affects the stack trace.
-		if p.As == ACALLNORESUME || p.As == obj.ANOP || p.As == ANop || p.Spadj != 0 || base != prevBase {
+		// Without resume points after calls (GOEXPERIMENT=wasmstackful), a CALL still
+		// needs its own PC so that its return address differs from the call site.
+		if p.As == ACALLNORESUME || p.As == ACALLRESULT || (p.As == obj.ACALL && stackful()) || p.As == obj.ANOP || p.As == ANop || p.Spadj != 0 || base != prevBase {
 			pc++
 			if p.To.Sym == sigpanic {
 				// The panic stack trace expects the PC at the call of sigpanic,
@@ -385,23 +517,42 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		// function) and perform the morestack check again.
 		// This is why we don't need an explicit loop like
 		// other architectures.
+		// With GOEXPERIMENT=wasmstackful, morestack returns
+		// normally instead, so loop back to redo the check.
+		if regABI() {
+			// Spill register arguments to their spill slots, where
+			// morestack can adjust any pointers into the stack.
+			p = spillRegArgs(s, p, newprog, (*obj.FuncInfo).SpillRegisterArgs)
+		}
 		p = appendp(p, obj.ACALL, constAddr(0))
 		if s.Func().Text.From.Sym.NeedCtxt() {
 			p.To = obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: morestack}
 		} else {
 			p.To = obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: morestackNoCtxt}
 		}
+		if regABI() {
+			p = spillRegArgs(s, p, newprog, (*obj.FuncInfo).UnspillRegisterArgs)
+		}
+		if stackful() {
+			p = appendp(p, ABr, constAddr(1)) // to the Loop below
+		}
 		p = appendp(p, AEnd)
+		if stackful() {
+			p = appendp(p, AEnd)       // end Loop
+			appendp(pMorestack, ALoop) // before the check
+		}
 	}
 
 	// record the branches targeting the entry loop and the unwind exit,
 	// their targets will be filled in later
 	var entryPointLoopBranches []*obj.Prog
 	var unwindExitBranches []*obj.Prog
+	var recoveryPCs []int64 // PC_B values where recovery may resume this function
+	sawDeferReturn := false
 	currentDepth := 0
 	for p := s.Func().Text; p != nil; p = p.Link {
 		switch p.As {
-		case ABlock, ALoop, AIf:
+		case ABlock, ALoop, AIf, ATryTable:
 			currentDepth++
 		case AEnd:
 			currentDepth--
@@ -424,7 +575,7 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			// low-level WebAssembly call to function
 			switch jmp.To.Type {
 			case obj.TYPE_MEM:
-				if !notUsePC_B[jmp.To.Sym.Name] {
+				if !notUsePC_B[jmp.To.Sym.Name] && !spParam() {
 					// Set PC_B parameter to function entry.
 					p = appendp(p, AI32Const, constAddr(0))
 				}
@@ -441,7 +592,16 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 				// so temporarily pop PC_F, using our REG_PC_B as a
 				// scratch register, and push it back after pushing 0.
 				p = appendp(p, ASet, regAddr(REG_PC_B))
-				p = appendp(p, AI32Const, constAddr(0))
+				if !spParam() {
+					p = appendp(p, AI32Const, constAddr(0))
+				} else {
+					p = appendp(p, AGet, regAddr(REG_SP))
+					if regABI() {
+						for r := int16(REG_R0); r < REG_R0+regABIArgs; r++ {
+							p = appendp(p, AGet, regAddr(r))
+						}
+					}
+				}
 				p = appendp(p, AGet, regAddr(REG_PC_B))
 
 				p = appendp(p, ACallIndirect)
@@ -452,13 +612,27 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 
 			p = appendp(p, AReturn)
 
-		case obj.ACALL, ACALLNORESUME:
+		case obj.ACALL, ACALLNORESUME, ACALLRESULT:
 			call := *p
 			p.As = obj.ANOP
 
 			pcAfterCall := call.Link.Pc
 			if call.To.Sym == sigpanic {
 				pcAfterCall-- // sigpanic expects to be called without advancing the pc
+			}
+			if hasRecoveryTarget && call.To.Sym != nil {
+				switch call.To.Sym.Name {
+				case "runtime.deferreturn":
+					if !sawDeferReturn {
+						// Matches cmd/link/internal/ld.computeDeferReturn,
+						// which uses the first deferreturn call.
+						recoveryPCs = append(recoveryPCs, pcAfterCall-1)
+						sawDeferReturn = true
+					}
+				case panicStart:
+					// _panic.start records its return PC (sys.GetCallerPC).
+					recoveryPCs = append(recoveryPCs, pcAfterCall)
+				}
 			}
 
 			// SP -= 8
@@ -480,7 +654,7 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			// low-level WebAssembly call to function
 			switch call.To.Type {
 			case obj.TYPE_MEM:
-				if !notUsePC_B[call.To.Sym.Name] {
+				if !notUsePC_B[call.To.Sym.Name] && !spParam() {
 					// Set PC_B parameter to function entry.
 					p = appendp(p, AI32Const, constAddr(0))
 				}
@@ -497,7 +671,16 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 				// so temporarily pop PC_F, using our PC_B as a
 				// scratch register, and push it back after pushing 0.
 				p = appendp(p, ASet, regAddr(REG_PC_B))
-				p = appendp(p, AI32Const, constAddr(0))
+				if !spParam() {
+					p = appendp(p, AI32Const, constAddr(0))
+				} else {
+					p = appendp(p, AGet, regAddr(REG_SP))
+					if regABI() {
+						for r := int16(REG_R0); r < REG_R0+regABIArgs; r++ {
+							p = appendp(p, AGet, regAddr(r))
+						}
+					}
+				}
 				p = appendp(p, AGet, regAddr(REG_PC_B))
 
 				p = appendp(p, ACallIndirect)
@@ -507,7 +690,19 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			}
 
 			// return value of call is on the top of the stack, indicating whether to unwind the WebAssembly stack
-			if call.As == ACALLNORESUME && call.To.Sym != sigpanic { // sigpanic unwinds the stack, but it never resumes
+			if call.As == ACALLRESULT {
+				// The caller inspects the result.
+			} else if stackful() && ctxt.Pkgpath != "runtime" {
+				// With GOEXPERIMENT=wasmstackful, only runtime functions
+				// unwind: gogo returns 1 through the scheduler frames up
+				// to mcall or morestack, which are all in package runtime.
+				// Nothing is ever rewound, so there are no resume points.
+				if spParam() {
+					p.Mark |= dropUnwind // see assemble
+				} else {
+					p = appendp(p, ADrop)
+				}
+			} else if call.As == ACALLNORESUME && call.To.Sym != sigpanic { // sigpanic unwinds the stack, but it never resumes
 				// trying to unwind WebAssembly stack but call has no resume point, terminate with error
 				p = appendp(p, AIf)
 				p = appendp(p, obj.AUNDEF)
@@ -534,7 +729,9 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 
 			if ret.To.Type == obj.TYPE_MEM {
 				// Set PC_B parameter to function entry.
-				p = appendp(p, AI32Const, constAddr(0))
+				if !spParam() {
+					p = appendp(p, AI32Const, constAddr(0))
+				}
 
 				// low-level WebAssembly call to function
 				p = appendp(p, ACall, ret.To)
@@ -707,6 +904,15 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 
 	{
 		p := s.Func().Text
+		var retryLoop *obj.Prog
+		if hasRecoveryTarget {
+			if len(recoveryPCs) == 0 {
+				panic("wasmstackful: recovery call not found")
+			}
+			retryLoop = appendp(p, ALoop)
+			p = appendp(retryLoop, ABlock)                      // caught
+			p = appendp(p, ATryTable, constAddr(coopResumeTag)) // catch → caught
+		}
 		if len(unwindExitBranches) > 0 {
 			p = appendp(p, ABlock) // unwindExit, used to return 1 when unwinding the stack
 			for _, b := range unwindExitBranches {
@@ -738,6 +944,64 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		if len(unwindExitBranches) > 0 {
 			p = appendp(p, AEnd) // end of unwindExit
 			p = appendp(p, AI32Const, constAddr(1))
+			if hasRecoveryTarget {
+				p = appendp(p, AReturn) // not the end of the function body
+			}
+		}
+		if hasRecoveryTarget {
+			externAddr := func(sym *obj.LSym, off int64) obj.Addr {
+				return obj.Addr{Type: obj.TYPE_ADDR, Name: obj.NAME_EXTERN, Sym: sym, Offset: off}
+			}
+			loadExtern := func(p *obj.Prog, sym *obj.LSym) *obj.Prog {
+				p = appendp(p, AI64Const, externAddr(sym, 0))
+				p = appendp(p, AI32WrapI64)
+				return appendp(p, AI64Load, constAddr(0))
+			}
+			throwUnless := func(p *obj.Prog) *obj.Prog {
+				p = appendp(p, AI32Eqz)
+				p = appendp(p, AIf)
+				p = appendp(p, AThrow, constAddr(coopResumeTag))
+				p.Mark |= rethrow
+				return appendp(p, AEnd)
+			}
+
+			p = appendp(p, AEnd) // end of try_table
+			p = appendp(p, obj.AUNDEF)
+			p = appendp(p, AEnd) // end of caught
+
+			// Only resume here if gogo targets one of this function's
+			// recovery PCs...
+			for i, pc := range recoveryPCs {
+				p = loadExtern(p, coopResumePC)
+				p = appendp(p, AI64Const, externAddr(s, pc))
+				p = appendp(p, AI64Eq)
+				if i > 0 {
+					p = appendp(p, AI32Or)
+				}
+			}
+			p = throwUnless(p)
+			// ...in this activation: g.stack.hi - gobuf.sp == FDEPTH.
+			p = appendp(p, AGet, regAddr(REGG))
+			p = appendp(p, AI32WrapI64)
+			p = appendp(p, AI64Load, constAddr(1*int64(ctxt.Arch.PtrSize))) // G.stack.hi
+			p = loadExtern(p, coopResumeSP)
+			p = appendp(p, AI64Sub)
+			p = appendp(p, AGet, regAddr(REG_FDEPTH))
+			p = appendp(p, AI64Eq)
+			p = throwUnless(p)
+
+			// gogo already set g and CTXT. Reload SP and dispatch to the PC.
+			p = loadExtern(p, coopResumeSP)
+			p = appendp(p, AI32WrapI64)
+			p = appendp(p, ASet, regAddr(REG_SP))
+			p = loadExtern(p, coopResumePC)
+			p = appendp(p, AI32WrapI64)
+			p = appendp(p, AI32Const, constAddr(0xffff))
+			p = appendp(p, AI32And)
+			p = appendp(p, ASet, regAddr(REG_PC_B))
+			p = appendp(p, ABr, obj.Addr{Type: obj.TYPE_BRANCH, Val: retryLoop})
+			p = appendp(p, AEnd) // end of retryLoop
+			p = appendp(p, obj.AUNDEF)
 		}
 	}
 
@@ -745,7 +1009,7 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 	blockDepths := make(map[*obj.Prog]int)
 	for p := s.Func().Text; p != nil; p = p.Link {
 		switch p.As {
-		case ABlock, ALoop, AIf:
+		case ABlock, ALoop, AIf, ATryTable:
 			currentDepth++
 			blockDepths[p] = currentDepth
 		case AEnd:
@@ -920,6 +1184,34 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 	p = appendp(p, ACall, obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: runtimeNotInitialized})
 	p = appendp(p, AEnd)
 
+	// cabi_realloc may be called by the host while lowering values into
+	// linear memory, where Component Model threads cannot switch; it always
+	// runs on the current stack, like a callback from within an import.
+	coopEntry := stackful() && !strings.HasPrefix(s.Name, "cabi_realloc") // the wrapper is named after the export
+	if coopEntry {
+		// A call while Go is idle (runtime.coopActive == 0) is a new call
+		// from the host on a new thread; a call while Go is running is a
+		// callback from within an import. See runtime/coop_wasip1.go.
+		active := obj.Addr{Type: obj.TYPE_ADDR, Name: obj.NAME_EXTERN, Sym: coopActive}
+		p = appendp(p, AI64Const, active)
+		p = appendp(p, AI32WrapI64)
+		p = appendp(p, AI64Load, constAddr(0))
+		p = appendp(p, AI64Eqz)
+		p = appendp(p, AIf)
+		// In c-shared mode, the first such call runs runtime.main
+		// (package initialization), which _initialize could not.
+		p = appendp(p, AI64Const, obj.Addr{Type: obj.TYPE_ADDR, Name: obj.NAME_EXTERN, Sym: coopMainStarted})
+		p = appendp(p, AI32WrapI64)
+		p = appendp(p, AI64Load, constAddr(0))
+		p = appendp(p, AI64Eqz)
+		p = appendp(p, AIf)
+		p = appendp(p, ACall, obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: coopStartMain})
+		p = appendp(p, AEnd)
+		p = appendp(p, ACALLNORESUME, obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: coopExportEnter})
+		p = appendp(p, AEnd)
+		p = coopAddActive(p, appendp, active, 1)
+	}
+
 	// Now that we've checked the SP, generate the prologue
 	if framesize > 0 {
 		p = appendp(p, AGet, regAddr(REG_SP))
@@ -977,7 +1269,9 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 	p = appendp(p, AI64Const, retAddr)
 	p = appendp(p, AI64Store, constAddr(0))
 	// Set PC_B parameter to function entry
-	p = appendp(p, AI32Const, constAddr(0))
+	if !spParam() {
+		p = appendp(p, AI32Const, constAddr(0))
+	}
 	p = appendp(p, ACall, obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: we.WrappedSym})
 	// Return value is on the top of the stack, indicating whether to unwind the Wasm stack.
 	// In the unwinding case, we call wasm_pc_f_loop_export to handle stack switch and rewinding,
@@ -989,6 +1283,10 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 	p = appendp(p, AI32WrapI64)
 	p = appendp(p, ACall, obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: wasm_pc_f_loop_export})
 	p = appendp(p, AEnd)
+
+	if coopEntry {
+		p = coopAddActive(p, appendp, obj.Addr{Type: obj.TYPE_ADDR, Name: obj.NAME_EXTERN, Sym: coopActive}, -1)
+	}
 
 	// Load result
 	if len(we.Results) > 1 {
@@ -1027,6 +1325,48 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 	p = appendp(p, AReturn)
 }
 
+// noReturn reports whether the call p is immediately followed by an
+// unreachable instruction, as the compiler emits after calls that do not
+// return with GOEXPERIMENT=wasmstackful. Its results are then left on the
+// (polymorphic) operand stack: popping them into locals would make the wasm
+// compiler merge them with the locals' values on the other paths, which can
+// slow down loops that contain panic checks.
+func noReturn(p *obj.Prog) bool {
+	for q := p.Link; q != nil; q = q.Link {
+		switch q.As {
+		case obj.ANOP, obj.APCDATA, obj.AFUNCDATA:
+			continue
+		case obj.AUNDEF:
+			return true
+		}
+		return false
+	}
+	return false
+}
+
+// spillRegArgs appends the instructions that spill or unspill s's register
+// arguments (GOEXPERIMENT=wasmregabi) after p, giving them p's PC.
+func spillRegArgs(s *obj.LSym, p *obj.Prog, newprog obj.ProgAlloc, gen func(*obj.FuncInfo, *obj.Prog, obj.ProgAlloc) *obj.Prog) *obj.Prog {
+	last := gen(s.Func(), p, newprog)
+	for q := p.Link; q != last.Link; q = q.Link {
+		q.Pc = p.Pc
+		q.Pos = p.Pos
+	}
+	return last
+}
+
+// coopAddActive emits runtime.coopActive += delta (GOEXPERIMENT=wasmstackful).
+func coopAddActive(p *obj.Prog, appendp func(p *obj.Prog, as obj.As, args ...obj.Addr) *obj.Prog, active obj.Addr, delta int64) *obj.Prog {
+	p = appendp(p, AI64Const, active)
+	p = appendp(p, AI32WrapI64)
+	p = appendp(p, AI64Const, active)
+	p = appendp(p, AI32WrapI64)
+	p = appendp(p, AI64Load, constAddr(0))
+	p = appendp(p, AI64Const, constAddr(delta))
+	p = appendp(p, AI64Add)
+	return appendp(p, AI64Store, constAddr(0))
+}
+
 func constAddr(value int64) obj.Addr {
 	return obj.Addr{Type: obj.TYPE_CONST, Offset: value}
 }
@@ -1038,31 +1378,34 @@ func regAddr(reg int16) obj.Addr {
 // Most of the Go functions have a single parameter (PC_B) in the
 // Wasm ABI. This is a list of exceptions.
 var notUsePC_B = map[string]bool{
-	"_rt0_wasm_js":            true,
-	"_rt0_wasm_wasip1":        true,
-	"_rt0_wasm_wasip1_lib":    true,
-	"wasm_export_run":         true,
-	"wasm_export_resume":      true,
-	"wasm_export_getsp":       true,
-	"wasm_pc_f_loop":          true,
-	"wasm_pc_f_loop_export":   true,
-	"gcWriteBarrier":          true,
-	"runtime.gcWriteBarrier1": true,
-	"runtime.gcWriteBarrier2": true,
-	"runtime.gcWriteBarrier3": true,
-	"runtime.gcWriteBarrier4": true,
-	"runtime.gcWriteBarrier5": true,
-	"runtime.gcWriteBarrier6": true,
-	"runtime.gcWriteBarrier7": true,
-	"runtime.gcWriteBarrier8": true,
-	"runtime.notInitialized":  true,
-	"runtime.wasmDiv":         true,
-	"runtime.wasmTruncS":      true,
-	"runtime.wasmTruncU":      true,
-	"cmpbody":                 true,
-	"memeqbody":               true,
-	"memcmp":                  true,
-	"memchr":                  true,
+	"_rt0_wasm_js":                true,
+	"_rt0_wasm_wasip1":            true,
+	"_rt0_wasm_wasip1_lib":        true,
+	"wasm_export_run":             true,
+	"wasm_export_resume":          true,
+	"wasm_export_getsp":           true,
+	"wasm_pc_f_loop":              true,
+	"wasm_pc_f_loop_export":       true,
+	"gcWriteBarrier":              true,
+	"runtime.gcWriteBarrier1":     true,
+	"runtime.gcWriteBarrier2":     true,
+	"runtime.gcWriteBarrier3":     true,
+	"runtime.gcWriteBarrier4":     true,
+	"runtime.gcWriteBarrier5":     true,
+	"runtime.gcWriteBarrier6":     true,
+	"runtime.gcWriteBarrier7":     true,
+	"runtime.gcWriteBarrier8":     true,
+	"runtime.notInitialized":      true,
+	"runtime.wasmCoopStartMain":   true,
+	"runtime.wasmCoopThreadStart": true,
+	"runtime.wasmCoopCabiRealloc": true,
+	"runtime.wasmDiv":             true,
+	"runtime.wasmTruncS":          true,
+	"runtime.wasmTruncU":          true,
+	"cmpbody":                     true,
+	"memeqbody":                   true,
+	"memcmp":                      true,
+	"memchr":                      true,
 }
 
 func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
@@ -1105,6 +1448,17 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 	case "wasm_pc_f_loop_export":
 		varDecls = []*varDecl{{count: 2, typ: i32}}
 		useAssemblyRegMap()
+	case "runtime.wasmCoopThreadStart":
+		// (param i32) is local 0 (R0); R1 and R2 are i64 scratch locals.
+		varDecls = []*varDecl{{count: 2, typ: i64}}
+		useAssemblyRegMap()
+	case "runtime.wasmCoopStartMain":
+		varDecls = []*varDecl{}
+		useAssemblyRegMap()
+	case "runtime.wasmCoopCabiRealloc":
+		// Four i32 params are locals 0-3 (R0-R3); R4-R9 are i64 scratch locals.
+		varDecls = []*varDecl{{count: 6, typ: i64}}
+		useAssemblyRegMap()
 	case "memchr", "memcmp":
 		varDecls = []*varDecl{{count: 2, typ: i32}}
 		useAssemblyRegMap()
@@ -1132,8 +1486,6 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			break
 		}
 
-		// Normal calling convention: PC_B as WebAssembly parameter. First local variable is local SP cache.
-		regVars[REG_PC_B-MINREG] = &regVar{false, 0}
 		hasLocalSP = true
 
 		var regUsed [MAXREG - MINREG]bool
@@ -1146,8 +1498,42 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			}
 		}
 
+		if spParam() {
+			// See spParam and regABI: the parameters are SP (local 0)
+			// and, with GOEXPERIMENT=wasmregabi, R0-R2. PC_B is the
+			// first local, 0 on entry; the other registers follow.
+			index := uint64(1)
+			if regABI() {
+				for reg := int16(REG_R0); reg < REG_R0+regABIArgs; reg++ {
+					regVars[reg-MINREG] = &regVar{false, index}
+					index++
+				}
+			}
+			regVars[REG_PC_B-MINREG] = &regVar{false, index}
+			index++
+			varDecls = append(varDecls, &varDecl{count: 1, typ: i32})
+			var lastDecl *varDecl
+			for reg := int16(REG_R0); reg <= REG_FDEPTH; reg++ {
+				if !regUsed[reg-MINREG] || regVars[reg-MINREG] != nil {
+					continue
+				}
+				t := regType(reg)
+				if lastDecl == nil || lastDecl.typ != t {
+					lastDecl = &varDecl{count: 0, typ: t}
+					varDecls = append(varDecls, lastDecl)
+				}
+				lastDecl.count++
+				regVars[reg-MINREG] = &regVar{false, index}
+				index++
+			}
+			break
+		}
+
+		// Normal calling convention: PC_B as WebAssembly parameter. First local variable is local SP cache.
+		regVars[REG_PC_B-MINREG] = &regVar{false, 0}
+
 		regs := []int16{REG_SP}
-		for reg := int16(REG_R0); reg <= REG_V15; reg++ {
+		for reg := int16(REG_R0); reg <= REG_FDEPTH; reg++ {
 			if regUsed[reg-MINREG] {
 				regs = append(regs, reg)
 			}
@@ -1178,12 +1564,165 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		w.WriteByte(byte(decl.typ))
 	}
 
-	if hasLocalSP {
+	if hasLocalSP && !spParam() {
 		// Copy SP from its global variable into a local variable. Accessing a local variable is more efficient.
 		updateLocalSP(w)
 	}
 
+	// With GOEXPERIMENT=wasmspparam, emitSP pushes SP, using the local SP in
+	// functions that follow the Go ABI and the SP global otherwise.
+	getSP := AGlobalGet
+	setSP := AGlobalSet
+	spIndex := uint64(0)
+	localSP := uint64(1) // the local SP cache, or with wasmspparam the SP parameter
+	if spParam() {
+		localSP = 0
+	}
+	if hasLocalSP {
+		getSP, setSP, spIndex = ALocalGet, ALocalSet, localSP
+	}
+	emitSP := func() {
+		writeOpcode(w, getSP)
+		writeUleb128(w, spIndex)
+	}
+	// takeSP handles the result of a call to a function that follows the Go
+	// ABI, SP|unwind: it stores SP and, unless the call is marked dropUnwind,
+	// leaves the unwind flag.
+	takeSP := func(p *obj.Prog) {
+		if p.Mark&dropUnwind != 0 {
+			writeOpcode(w, AI32Const)
+			writeSleb128(w, -2)
+			writeOpcode(w, AI32And)
+			writeOpcode(w, setSP)
+			writeUleb128(w, spIndex)
+			return
+		}
+		writeOpcode(w, setSP)
+		writeUleb128(w, spIndex)
+		emitSP()
+		writeOpcode(w, AI32Const)
+		writeSleb128(w, 1)
+		writeOpcode(w, AI32And)
+		emitSP()
+		writeOpcode(w, AI32Const)
+		writeSleb128(w, -2)
+		writeOpcode(w, AI32And)
+		writeOpcode(w, setSP)
+		writeUleb128(w, spIndex)
+	}
+	// orSP combines an unwind flag with SP for the result of a function that
+	// follows the Go ABI.
+	orSP := func() {
+		emitSP()
+		writeOpcode(w, AI32Or)
+	}
+	// With GOEXPERIMENT=wasmregabi, pushRegs pushes the argument or result
+	// registers R0-R2 (locals 1-3) of a function that follows the Go ABI,
+	// and zeros otherwise, and popRegs pops them (after a call).
+	pushRegs := func() {
+		if !regABI() {
+			return
+		}
+		for i := range uint64(regABIArgs) {
+			if hasLocalSP {
+				writeOpcode(w, ALocalGet)
+				writeUleb128(w, 1+i)
+			} else {
+				writeOpcode(w, AI64Const)
+				writeSleb128(w, 0)
+			}
+		}
+	}
+	popRegs := func() {
+		if !regABI() {
+			return
+		}
+		for i := uint64(regABIArgs); i > 0; i-- {
+			if hasLocalSP {
+				writeOpcode(w, ALocalSet)
+				writeUleb128(w, i)
+			} else {
+				writeOpcode(w, ADrop)
+			}
+		}
+	}
+	syncGlobalSP := func() {
+		if hasLocalSP {
+			writeOpcode(w, ALocalGet)
+			writeUleb128(w, localSP)
+			writeOpcode(w, AGlobalSet)
+			writeUleb128(w, 0)
+		}
+	}
+
 	for p := s.Func().Text; p != nil; p = p.Link {
+		if spParam() {
+			switch p.As {
+			case ACall:
+				if p.To.Type != obj.TYPE_MEM {
+					break
+				}
+				if p.Mark&WasmImport == 0 && !notUsePC_B[p.To.Sym.Name] {
+					// The callee follows the Go ABI: pass SP, take its SP.
+					emitSP()
+					pushRegs()
+					writeOpcode(w, ACall)
+					s.AddRel(ctxt, obj.Reloc{
+						Type: objabi.R_CALL,
+						Off:  int32(w.Len()),
+						Siz:  1, // actually variable sized
+						Sym:  p.To.Sym,
+					})
+					if !noReturn(p) {
+						popRegs()
+						takeSP(p)
+					}
+					continue
+				}
+				if !spFree[p.To.Sym.Name] {
+					syncGlobalSP()
+				}
+				// The callee restores SP (if it changes it at all), and a
+				// host import may let other threads run Go code, which uses
+				// the SP global for their own stacks, so keep the local SP.
+				writeOpcode(w, ACall)
+				typ := objabi.R_CALL
+				if p.Mark&WasmImport != 0 {
+					typ = objabi.R_WASMIMPORT
+				}
+				s.AddRel(ctxt, obj.Reloc{
+					Type: typ,
+					Off:  int32(w.Len()),
+					Siz:  1, // actually variable sized
+					Sym:  p.To.Sym,
+				})
+				continue
+
+			case ACallIndirect:
+				// Callers push SP (and, with GOEXPERIMENT=wasmregabi, the
+				// register arguments) below the function index.
+				writeOpcode(w, ACallIndirect)
+				writeUleb128(w, uint64(p.To.Offset))
+				w.WriteByte(0x00) // reserved value
+				if !noReturn(p) {
+					popRegs()
+					takeSP(p)
+				}
+				continue
+
+			case AReturn:
+				if hasLocalSP {
+					orSP()
+					pushRegs()
+				}
+
+			case AThrow:
+				if p.Mark&rethrow == 0 {
+					syncGlobalSP()
+				}
+			}
+		}
+
 		switch p.As {
 		case AGet:
 			if p.From.Type != obj.TYPE_REG {
@@ -1196,7 +1735,7 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			}
 			if reg == REG_SP && hasLocalSP {
 				writeOpcode(w, ALocalGet)
-				writeUleb128(w, 1) // local SP
+				writeUleb128(w, localSP)
 				continue
 			}
 			if v.global {
@@ -1217,8 +1756,13 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 				panic("bad Set: invalid register")
 			}
 			if reg == REG_SP && hasLocalSP {
+				if spParam() {
+					writeOpcode(w, ALocalSet)
+					writeUleb128(w, localSP) // see spParam
+					continue
+				}
 				writeOpcode(w, ALocalTee)
-				writeUleb128(w, 1) // local SP
+				writeUleb128(w, localSP)
 			}
 			if v.global {
 				writeOpcode(w, AGlobalSet)
@@ -1252,6 +1796,20 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 
 		case obj.AUNDEF:
 			writeOpcode(w, AUnreachable)
+			continue
+
+		case ATryTable:
+			w.WriteByte(0x1F) // try_table
+			w.WriteByte(0x40) // empty block type
+			writeUleb128(w, 1)
+			w.WriteByte(0x00) // catch
+			writeUleb128(w, uint64(p.From.Offset))
+			writeUleb128(w, 0) // label: the block enclosing the try_table
+			continue
+
+		case AThrow:
+			w.WriteByte(0x08) // throw
+			writeUleb128(w, uint64(p.From.Offset))
 			continue
 
 		case obj.ANOP, obj.ATEXT, obj.AFUNCDATA, obj.APCDATA:
@@ -1400,6 +1958,12 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		}
 	}
 
+	if hasLocalSP && spParam() {
+		// The function body leaves the unwind flag; combine it with SP.
+		// (If the end is unreachable, the operand stack is polymorphic.)
+		orSP()
+		pushRegs()
+	}
 	w.WriteByte(0x0b) // end
 
 	s.P = w.Bytes()
@@ -1468,6 +2032,8 @@ func regType(reg int16) valueType {
 		return f64
 	case reg >= REG_V0 && reg <= REG_V15:
 		return v128
+	case reg == REG_FDEPTH:
+		return i64
 	default:
 		panic("invalid register")
 	}

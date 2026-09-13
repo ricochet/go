@@ -6763,6 +6763,10 @@ type State struct {
 
 	// wasm: The number of values on the WebAssembly stack. This is only used as a safeguard.
 	OnWasmStackSkipped int
+
+	// ArchData holds per-function state for the architecture backend,
+	// set up by Arch.SSAPrepareBlocks.
+	ArchData any
 }
 
 func (s *State) FuncInfo() *obj.FuncInfo {
@@ -7095,6 +7099,11 @@ func genssa(htmlWriter ssa.HTMLWriter, f *ssa.Func, pp *objw.Progs) {
 			hotAlign = 64
 			hotRequire = 31
 		}
+	}
+
+	if Arch.SSAPrepareBlocks != nil {
+		// May reorder f.Blocks.
+		Arch.SSAPrepareBlocks(&s, f)
 	}
 
 	// Emit basic blocks

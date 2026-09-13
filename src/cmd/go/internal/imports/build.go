@@ -213,6 +213,8 @@ func matchTag(name string, tags map[string]bool, prefer bool) bool {
 		return tags["illumos"]
 	case "darwin":
 		return tags["ios"]
+	case "wasip1":
+		return tags["wasip3"]
 	case "unix":
 		return syslist.UnixOS[cfg.BuildContext.GOOS]
 	default:

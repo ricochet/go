@@ -285,6 +285,16 @@ func TestTracebackArgs(t *testing.T) {
 		}
 		return y
 	}
+	// regs5Sel selects the expected output for register ABIs with at least 5
+	// integer argument registers (x) or fewer (y), where the trailing arguments
+	// of the functions below are on the stack and so always printed exactly
+	// (GOEXPERIMENT=wasmregabi has 3).
+	regs5Sel := func(x, y string) string {
+		if abi.IntArgRegs >= 5 {
+			return x
+		}
+		return y
+	}
 
 	tests := []struct {
 		fn     func() int
@@ -388,18 +398,21 @@ func TestTracebackArgs(t *testing.T) {
 				return testTracebackArgs9(1, 2, 3, 4, [2]int{5, 6}, 7)
 			},
 			abiSel(
-				"testTracebackArgs9(0x1, 0xffffffff?, 0x3, 0xff?, {0x5, 0x6}, 0x7)",
+				regs5Sel(
+					"testTracebackArgs9(0x1, 0xffffffff?, 0x3, 0xff?, {0x5, 0x6}, 0x7)",
+					"testTracebackArgs9(0x1, 0xffffffff?, 0x3, 0x4, {0x5, 0x6}, 0x7)"),
 				"testTracebackArgs9(0x1, 0x2, 0x3, 0x4, {0x5, 0x6}, 0x7)"),
 		},
 		// No live.
-		// (Note: this assume at least 5 int registers if register ABI is used.)
 		{
 			func() int {
 				poisonStack() // poison arg area to make output deterministic
 				return testTracebackArgs10(1, 2, 3, 4, 5)
 			},
 			abiSel(
-				"testTracebackArgs10(0xffffffff?, 0xffffffff?, 0xffffffff?, 0xffffffff?, 0xffffffff?)",
+				regs5Sel(
+					"testTracebackArgs10(0xffffffff?, 0xffffffff?, 0xffffffff?, 0xffffffff?, 0xffffffff?)",
+					"testTracebackArgs10(0xffffffff?, 0xffffffff?, 0xffffffff?, 0x4, 0x5)"),
 				"testTracebackArgs10(0x1, 0x2, 0x3, 0x4, 0x5)"),
 		},
 		// Conditional spills.

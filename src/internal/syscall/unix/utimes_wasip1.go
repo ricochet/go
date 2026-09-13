@@ -11,10 +11,6 @@ import (
 	"unsafe"
 )
 
-//go:wasmimport wasi_snapshot_preview1 path_filestat_set_times
-//go:noescape
-func path_filestat_set_times(fd int32, flags uint32, path *byte, pathLen size, atim uint64, mtim uint64, fstflags uint32) syscall.Errno
-
 func Utimensat(dirfd int, path string, times *[2]syscall.Timespec, flag int) error {
 	if path == "" {
 		return syscall.EINVAL

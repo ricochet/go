@@ -1182,7 +1182,7 @@ func (t *structType) Field(i int) (f StructField) {
 
 	// We can't safely use this optimization on js or wasi,
 	// which do not appear to support read-only data.
-	if i < 256 && runtime.GOOS != "js" && runtime.GOOS != "wasip1" {
+	if i < 256 && runtime.GOOS != "js" && runtime.GOOS != "wasip1" && runtime.GOOS != "wasip3" {
 		staticuint64s := getStaticuint64s()
 		p := unsafe.Pointer(&(*staticuint64s)[i])
 		if unsafe.Sizeof(int(0)) == 4 && goarch.BigEndian {

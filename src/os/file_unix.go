@@ -432,7 +432,7 @@ func readlink(name string) (string, error) {
 			return fixCount(syscall.Readlink(name, b))
 		})
 		// buffer too small
-		if (runtime.GOOS == "aix" || runtime.GOOS == "wasip1") && err == syscall.ERANGE {
+		if (runtime.GOOS == "aix" || runtime.GOOS == "wasip1" || runtime.GOOS == "wasip3") && err == syscall.ERANGE {
 			continue
 		}
 		if err != nil {

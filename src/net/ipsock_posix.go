@@ -27,7 +27,7 @@ import (
 // IPv6 support too. So probe the kernel to figure it out.
 func (p *ipStackCapabilities) probe() {
 	switch runtime.GOOS {
-	case "js", "wasip1":
+	case "js", "wasip1", "wasip3":
 		// Both ipv4 and ipv6 are faked; see net_fake.go.
 		p.ipv4Enabled = true
 		p.ipv6Enabled = true
@@ -164,7 +164,7 @@ func favoriteAddrFamily(network string, laddr, raddr sockaddr, mode string) (fam
 
 func internetSocket(ctx context.Context, net string, laddr, raddr sockaddr, sotype, proto int, mode string, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) (fd *netFD, err error) {
 	switch runtime.GOOS {
-	case "aix", "freebsd", "windows", "openbsd", "js", "wasip1":
+	case "aix", "freebsd", "windows", "openbsd", "js", "wasip1", "wasip3":
 		if mode == "dial" && raddr.isWildcard() {
 			raddr = raddr.toLocal(net)
 		}

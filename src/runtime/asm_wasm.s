@@ -25,6 +25,30 @@ TEXT runtime·rt0_go(SB), NOSPLIT|NOFRAME|TOPFRAME, $0
 	CALL runtime·mstart(SB) // WebAssembly stack will unwind when switching to another goroutine
 	UNDEF
 
+#ifdef GOOS_wasip1
+#ifdef GOEXPERIMENT_wasmstackful
+// rt0_go_init is rt0_go without starting the scheduler. It is used by
+// _initialize in c-shared mode with GOEXPERIMENT=wasmstackful, because
+// _initialize runs at component instantiation, where Component Model threads
+// cannot switch. The first export call starts the scheduler instead (see
+// wasmCoopStartMain).
+TEXT runtime·rt0_go_init(SB), NOSPLIT|NOFRAME|TOPFRAME, $0
+	// save m->g0 = g0
+	MOVD $runtime·g0(SB), runtime·m0+m_g0(SB)
+	// save m0 to g0->m
+	MOVD $runtime·m0(SB), runtime·g0+g_m(SB)
+	// set g to g0
+	MOVD $runtime·g0(SB), g
+	CALLNORESUME runtime·check(SB)
+	CALLNORESUME runtime·osinit(SB)
+	CALLNORESUME runtime·schedinit(SB)
+	MOVD $runtime·mainPC(SB), 0(SP)
+	CALLNORESUME runtime·newproc(SB)
+	I32Const $0
+	Return
+#endif
+#endif
+
 TEXT runtime·mstart(SB),NOSPLIT|TOPFRAME,$0
 	CALL	runtime·mstart0(SB)
 	RET // not reached
@@ -32,8 +56,72 @@ TEXT runtime·mstart(SB),NOSPLIT|TOPFRAME,$0
 DATA  runtime·mainPC+0(SB)/8,$runtime·main(SB)
 GLOBL runtime·mainPC(SB),RODATA,$8
 
+#ifdef GOOS_wasip1
+#ifdef GOEXPERIMENT_wasmcoopthreads
+#define WASM_COOP_THREADS
+#ifdef GOEXPERIMENT_wasmstackful
+// Functions are not resumable (see cmd/internal/obj/wasm). gogo returns 1,
+// which only runtime functions propagate, up to the mcall or morestack that
+// is being resumed; that frame returns normally to its caller on the
+// goroutine's stack. If gogo resumes some other frame, mcall or morestack
+// throws exception tag 0 instead, which functions with deferreturn (panic
+// recovery) and wasmCoopThreadStart (a goroutine starting on a recycled
+// thread) catch.
+#define WASM_STACKFUL
+#ifdef GOEXPERIMENT_wasmspparam
+// Functions that follow the Go ABI take SP as their wasm parameter, instead
+// of PC_B, and return it with the unwind flag (see cmd/internal/obj/wasm), so
+// code that does not follow the Go ABI and calls them indirectly pushes SP
+// before the function index; the assembler handles the result.
+#define WASM_SP_PARAM
+#ifdef GOEXPERIMENT_wasmregabi
+// With the register ABI, such functions also take and return the integer
+// argument registers R0-R2.
+#define WASM_REG_ABI
+#endif
+#endif
+#endif
+#endif
+#endif
+
+#ifdef WASM_COOP_THREADS
+// func gogo(buf *gobuf)
+// With GOEXPERIMENT=wasmcoopthreads (see coop_wasip1.go), buf's goroutine may
+// be owned by another Component Model thread. In that case switch to it; this
+// thread resumes here only when some other thread switches back to a
+// goroutine that this thread owns. Either way, the gobuf to apply is then in
+// runtime·coopBuf. The SP global belongs to whichever thread ran last, so
+// nothing below may read the stack before SP is reloaded from the gobuf.
+TEXT runtime·gogo(SB), NOSPLIT, $16-8
+	MOVD buf+0(FP), R0
+	MOVD R0, 0(SP)
+	CALLNORESUME runtime·wasmCoopPrepare(SB)
+	MOVW 8(SP), R1
+	Get R1
+	I64Eqz
+	Not
+	If
+		MOVD R1, 0(SP)
+		CALLNORESUME runtime·coopThreadSuspendThenResume(SB)
+#ifdef WASM_STACKFUL
+		// Resumed only to exit (see coopRetireThread): throw out to
+		// wasmCoopThreadStart without applying any gobuf.
+		MOVD $runtime·coopRetire(SB), R0
+		I64Load 0(R0)
+		I64Eqz
+		Not
+		If
+			MOVD $0, runtime·coopRetire(SB)
+			Throw $0
+		End
+#endif
+	End
+	MOVD $runtime·coopBuf(SB), R0
+	MOVD 0(R0), R0
+#else
 TEXT runtime·gogo(SB), NOSPLIT, $0-8
 	MOVD buf+0(FP), R0
+#endif
 	MOVD gobuf_g(R0), R1
 	MOVD 0(R1), R2	// make sure g != nil
 	MOVD R1, g
@@ -47,6 +135,15 @@ TEXT runtime·gogo(SB), NOSPLIT, $0-8
 	I64Store $0
 
 	MOVD gobuf_ctxt(R0), CTXT
+#ifdef WASM_STACKFUL
+	// Tell the catching frame what is being resumed.
+	MOVD gobuf_pc(R0), R2
+	MOVD $runtime·coopResumePC(SB), R3
+	MOVD R2, 0(R3)
+	MOVD gobuf_sp(R0), R2
+	MOVD $runtime·coopResumeSP(SB), R3
+	MOVD R2, 0(R3)
+#endif
 	// clear to help garbage collector
 	MOVD $0, gobuf_sp(R0)
 	MOVD $0, gobuf_ctxt(R0)
@@ -54,6 +151,106 @@ TEXT runtime·gogo(SB), NOSPLIT, $0-8
 	I32Const $1
 	Return
 
+#ifdef WASM_COOP_THREADS
+// func coopRetireSwitch(thread uint32)
+// Yields to thread so that it exits (see coopRetireThread). That thread
+// resumes inside its own import wrapper, whose epilogue adjusts the SP global
+// before the thread exits, so restore SP afterwards.
+TEXT runtime·coopRetireSwitch(SB), NOSPLIT, $8-4
+	Get SP
+	I64ExtendI32U
+	Set R5 // not R0-R2, which calls clobber with GOEXPERIMENT=wasmregabi
+	MOVW thread+0(FP), R0
+	MOVD R0, 0(SP)
+	CALLNORESUME runtime·coopThreadYieldThenResume(SB)
+	Get R5
+	I32WrapI64
+	Set SP
+	RET
+#endif
+
+#ifdef WASM_STACKFUL
+// func mcall(fn func(*g))
+// Switch to m->g0's stack, call fn(g).
+// Fn must never return. It should gogo(&g->sched)
+// to keep running g. That gogo returns 1 through the scheduler frames to
+// here: if it resumes this mcall (same g, same caller PC), mcall returns to
+// its caller on the goroutine's current stack. Otherwise it throws.
+TEXT runtime·mcall(SB), NOSPLIT, $0-8
+	// CTXT = fn
+	MOVD fn+0(FP), CTXT
+	// R1 = g.m
+	MOVD g_m(g), R1
+	// R2 = g0
+	MOVD m_g0(R1), R2
+
+	// save state in g->sched
+	MOVD 0(SP), g_sched+gobuf_pc(g)     // caller's PC
+	MOVD $fn+0(FP), g_sched+gobuf_sp(g) // caller's SP
+
+	// if g == g0 call badmcall
+	Get g
+	Get R2
+	I64Eq
+	If
+		JMP runtime·badmcall(SB)
+	End
+
+	// Remember the resumption this frame waits for.
+	MOVD g, R3
+	MOVD 0(SP), R4
+
+	// switch to g0's stack
+	I64Load (g_sched+gobuf_sp)(R2)
+	I64Const $8
+	I64Sub
+	I32WrapI64
+	Set SP
+
+	// set arg to current g
+	MOVD g, 0(SP)
+#ifdef WASM_REG_ABI
+	MOVD g, R0 // fn is ABIInternal
+#endif
+
+	// switch to g0
+	MOVD R2, g
+
+	// call fn
+	Get CTXT
+	I32WrapI64
+	I64Load $0
+	CALLRESULT
+	I32Eqz
+	If
+		UNDEF // fn returned
+	End
+
+	// gogo set g, SP and CTXT, and unwound to here.
+	Get g
+	Get R3
+	I64Ne
+	If
+		Throw $0
+	End
+	MOVD $runtime·coopResumePC(SB), R5
+	I64Load 0(R5)
+	Get R4
+	I64Ne
+	If
+		Throw $0
+	End
+
+	// The goroutine's stack may have moved while it was parked. Return to
+	// the caller with SP = sched.sp, as recorded by gogo.
+	MOVD $runtime·coopResumeSP(SB), R5
+	I64Load 0(R5)
+	I64Const $8
+	I64Sub
+	I32WrapI64
+	Set SP
+	RET
+#else
 // func mcall(fn func(*g))
 // Switch to m->g0's stack, call fn(g).
 // Fn must never return. It should gogo(&g->sched)
@@ -103,6 +300,7 @@ TEXT runtime·mcall(SB), NOSPLIT, $0-8
 	Set SP
 
 	JMP runtime·badmcall2(SB)
+#endif
 
 // func systemstack(fn func())
 TEXT runtime·systemstack(SB), NOSPLIT, $0-8
@@ -261,11 +459,50 @@ TEXT runtime·morestack(SB), NOSPLIT, $0-0
 	MOVD $16(SP), m_morebuf+gobuf_sp(R1) // f's caller's SP
 	MOVD g, m_morebuf+gobuf_g(R1)
 
+#ifdef WASM_STACKFUL
+	// Remember the resumption this frame waits for.
+	MOVD g, R3
+	MOVD 0(SP), R4
+
+	// Call newstack on m->g0's stack.
+	MOVD R2, g
+	MOVD g_sched+gobuf_sp(R2), SP
+	CALLRESULT runtime·newstack(SB)
+	I32Eqz
+	If
+		UNDEF // crash if newstack returns
+	End
+
+	// newstack (or, after preemption, the scheduler) gogo'd back to f's
+	// prologue, which rechecks the stack bound. Return to f if that is this
+	// morestack call, with SP = f's SP on the goroutine's (possibly new) stack.
+	Get g
+	Get R3
+	I64Ne
+	If
+		Throw $0
+	End
+	MOVD $runtime·coopResumePC(SB), R5
+	I64Load 0(R5)
+	Get R4
+	I64Ne
+	If
+		Throw $0
+	End
+	MOVD $runtime·coopResumeSP(SB), R5
+	I64Load 0(R5)
+	I64Const $8
+	I64Sub
+	I32WrapI64
+	Set SP
+	RET
+#else
 	// Call newstack on m->g0's stack.
 	MOVD R2, g
 	MOVD g_sched+gobuf_sp(R2), SP
 	CALL runtime·newstack(SB)
 	UNDEF // crash if newstack returns
+#endif
 
 // morestack but not preserving ctxt.
 TEXT runtime·morestack_noctxt(SB),NOSPLIT,$0
@@ -338,11 +575,13 @@ TEXT NAME(SB), WRAPPER, $MAXSIZE-48; \
 		MemoryCopy; \
 	End; \
 	\
+	LOAD_REG_ARGS; \
 	MOVD f+8(FP), CTXT; \
 	Get CTXT; \
 	I32WrapI64; \
 	I64Load $0; \
 	CALL; \
+	STORE_REG_RESULTS; \
 	\
 	I64Load32U stackRetOffset+28(FP); \
 	Set R0; \
@@ -365,8 +604,32 @@ TEXT NAME(SB), WRAPPER, $MAXSIZE-48; \
 	I64Sub; \
 	Set RET3; \
 	\
+	CALLRET_REGS; \
 	CALL callRet<>(SB); \
 	RET
+
+#ifdef WASM_REG_ABI
+// Load the integer argument registers from regArgs.Ints and, after the call,
+// store the result registers there (see internal/abi.RegArgs).
+#define LOAD_REG_ARGS \
+	MOVD regArgs+40(FP), R3; \
+	MOVD 0(R3), R0; \
+	MOVD 8(R3), R1; \
+	MOVD 16(R3), R2
+#define STORE_REG_RESULTS \
+	MOVD regArgs+40(FP), R3; \
+	MOVD R0, 0(R3); \
+	MOVD R1, 8(R3); \
+	MOVD R2, 16(R3)
+// callRet passes regArgs to reflectcallmove in CTXT.
+#define CALLRET_REGS MOVD regArgs+40(FP), CTXT
+#define CALLRET_REGS_ARG MOVD CTXT, 32(SP)
+#else
+#define LOAD_REG_ARGS
+#define STORE_REG_RESULTS
+#define CALLRET_REGS
+#define CALLRET_REGS_ARG MOVD $0, 32(SP)
+#endif
 
 // callRet copies return values back at the end of call*. This is a
 // separate function so it can allocate stack space for the arguments
@@ -378,7 +641,7 @@ TEXT callRet<>(SB), NOSPLIT, $40-0
 	MOVD RET1, 8(SP)
 	MOVD RET2, 16(SP)
 	MOVD RET3, 24(SP)
-	MOVD $0,   32(SP)
+	CALLRET_REGS_ARG
 	CALL runtime·reflectcallmove(SB)
 	RET
 
@@ -509,17 +772,29 @@ TEXT wasm_pc_f_loop(SB),NOSPLIT,$0
 	loop:
 		Loop
 			// Get PC_B & PC_F from -8(SP)
+#ifdef WASM_SP_PARAM
+			// (Functions have no PC_B parameter; see cmd/internal/obj/wasm.)
+			Get SP
+#else
 			Get SP
 			I32Const $8
 			I32Sub
 			I32Load16U $0 // PC_B
+#endif
+#ifdef WASM_SP_PARAM
+#ifdef WASM_REG_ABI
+			I64Const $0 // R0-R2
+			I64Const $0
+			I64Const $0
+#endif
+#endif
 
 			Get SP
 			I32Const $8
 			I32Sub
 			I32Load $2 // PC_F
 
-			CallIndirect $0
+			CallIndirect $0 // with WASM_SP_PARAM, the assembler takes SP from the result
 			Drop
 
 			Get PAUSE
@@ -565,13 +840,23 @@ outer:
 				BrIf outer // actually jump to after the corresponding End
 			End
 
+#ifdef WASM_SP_PARAM
+			Get SP
+#else
 			Get SP
 			I32Const $8
 			I32Sub
 			I32Load16U $0 // PC_B
-
+#endif
+#ifdef WASM_SP_PARAM
+#ifdef WASM_REG_ABI
+			I64Const $0 // R0-R2
+			I64Const $0
+			I64Const $0
+#endif
+#endif
 			Get R2 // PC_F
-			CallIndirect $0
+			CallIndirect $0 // with WASM_SP_PARAM, the assembler takes SP from the result
 			Set R1 // save return/unwinding state for next iteration
 
 			Get PAUSE
@@ -590,6 +875,10 @@ TEXT wasm_export_lib(SB),NOSPLIT,$0
 
 TEXT runtime·pause(SB), NOSPLIT, $0-8
 	MOVD newsp+0(FP), SP
+#ifdef WASM_STACKFUL
+	// Go is idle until the host calls an export (see coop_wasip1.go).
+	MOVD $0, runtime·coopActive(SB)
+#endif
 	I32Const $1
 	Set PAUSE
 	RETUNWIND
@@ -597,9 +886,13 @@ TEXT runtime·pause(SB), NOSPLIT, $0-8
 // Called if a wasmexport function is called before runtime initialization
 TEXT runtime·notInitialized(SB), NOSPLIT, $0
 	MOVD $runtime·wasmStack+(m0Stack__size-16-8)(SB), SP
+#ifndef WASM_SP_PARAM
 	I32Const $0 // entry PC_B
+#endif
 	Call runtime·notInitialized1(SB)
 	Drop
+#ifndef WASM_SP_PARAM
 	I32Const $0 // entry PC_B
+#endif
 	Call runtime·abort(SB)
 	UNDEF

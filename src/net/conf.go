@@ -140,7 +140,7 @@ func initConfVal() {
 
 	// The remaining checks are specific to Unix systems.
 	switch runtime.GOOS {
-	case "plan9", "windows", "js", "wasip1":
+	case "plan9", "windows", "js", "wasip1", "wasip3":
 		return
 	}
 

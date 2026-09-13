@@ -140,9 +140,46 @@ func Init(arch *ssagen.ArchInfo) {
 	arch.ZeroRange = zeroRange
 	arch.Ginsnop = ginsnop
 
+	arch.SSAPrepareBlocks = ssaPrepareBlocks
 	arch.SSAMarkMoves = ssaMarkMoves
 	arch.SSAGenValue = ssaGenValue
 	arch.SSAGenBlock = ssaGenBlock
+	arch.LoadRegResult = loadRegResult
+	arch.SpillArgReg = spillArgReg
+}
+
+// regMoveOp returns the MOV instruction that moves a value of type t between
+// an integer register and memory (GOEXPERIMENT=wasmregabi).
+func regMoveOp(t *types.Type) obj.As {
+	if t.IsFloat() {
+		panic("wasm: floating-point register argument")
+	}
+	switch t.Size() {
+	case 1:
+		return wasm.AMOVB
+	case 2:
+		return wasm.AMOVH
+	case 4:
+		return wasm.AMOVW
+	case 8:
+		return wasm.AMOVD
+	}
+	panic("wasm: bad register argument size")
+}
+
+func loadRegResult(s *ssagen.State, f *ssa.Func, t *types.Type, reg int16, n *ir.Name, off int64) *obj.Prog {
+	p := s.Prog(regMoveOp(t))
+	p.From = obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_AUTO, Reg: wasm.REG_SP, Sym: n.Linksym(), Offset: n.FrameOffset() + off}
+	p.To = obj.Addr{Type: obj.TYPE_REG, Reg: reg}
+	return p
+}
+
+func spillArgReg(pp *objw.Progs, p *obj.Prog, f *ssa.Func, t *types.Type, reg int16, n *ir.Name, off int64) *obj.Prog {
+	p = pp.Append(p, regMoveOp(t), obj.TYPE_REG, reg, 0, obj.TYPE_MEM, 0, n.FrameOffset()+off)
+	p.To.Name = obj.NAME_PARAM
+	p.To.Sym = n.Linksym()
+	p.Pos = p.Pos.WithNotStmt()
+	return p
 }
 
 func zeroRange(pp *objw.Progs, p *obj.Prog, off, cnt int64, state *uint32) *obj.Prog {
@@ -167,9 +204,27 @@ func ginsnop(pp *objw.Progs) *obj.Prog {
 }
 
 func ssaMarkMoves(s *ssagen.State, b *ssa.Block) {
+	// Called at the start of each block.
+	if sf := structured(s); sf != nil {
+		sf.emitLayout(s, sf.pre[b.ID])
+	}
 }
 
 func ssaGenBlock(s *ssagen.State, b, next *ssa.Block) {
+	if sf := structured(s); sf != nil {
+		sf.genBlock(s, b)
+		if s.OnWasmStackSkipped != 0 {
+			msg := "wasm: bad stack in " + b.Func.Name + " " + b.String() + ":"
+			for _, v := range b.Values {
+				if v.OnWasmStack {
+					msg += " " + v.LongString()
+				}
+			}
+			panic(msg)
+		}
+		return
+	}
+
 	switch b.Kind {
 	case block.BlockPlain, block.BlockDefer:
 		if next != b.Succs[0].Block() {
@@ -203,7 +258,15 @@ func ssaGenBlock(s *ssagen.State, b, next *ssa.Block) {
 	case block.BlockRet:
 		s.Prog(obj.ARET)
 
-	case block.BlockExit, block.BlockRetJmp:
+	case block.BlockExit:
+		if stackful() {
+			// The block ends in a call that does not return (without
+			// wasmstackful, it may unwind and be resumed). Saying so lets
+			// the wasm compiler ignore the call's results.
+			s.Prog(obj.AUNDEF)
+		}
+
+	case block.BlockRetJmp:
 
 	default:
 		base.FatalfAt(b.Pos, "unexpected block b%d, kind=%v", b.ID, b.Kind)
@@ -269,6 +332,10 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		s.Prog(wasm.AIf)
 		p := s.Prog(wasm.ACALLNORESUME)
 		p.To = obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: ir.Syms.SigPanic}
+		if stackful() {
+			// sigpanic does not return (see BlockExit in ssaGenBlock).
+			s.Prog(obj.AUNDEF)
+		}
 		s.Prog(wasm.AEnd)
 		if logopt.Enabled() {
 			logopt.LogOpt(v.Pos, "nilcheck", "genssa", v.Block.Func.Name)
@@ -308,6 +375,19 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 	case ssaop.OpClobber, ssaop.OpClobberReg:
 		// TODO: implement for clobberdead experiment. Nop is ok for now.
 
+	case ssaop.OpArgIntReg, ssaop.OpArgFloatReg:
+		// GOEXPERIMENT=wasmregabi: the argument is already in its register,
+		// a wasm parameter. The assembler needs to wrap the stack growth
+		// check with spill/unspill. The loop only runs once.
+		for _, ap := range v.Block.Func.RegArgs {
+			// Offset by the size of the return address on the Go stack.
+			addr := ssagen.SpillSlotAddr(ap, wasm.REG_SP, v.Block.Func.Config.PtrSize)
+			op := regMoveOp(ap.Type)
+			s.FuncInfo().AddSpill(obj.RegSpill{Reg: ap.Reg, Addr: addr, Unspill: op, Spill: op})
+		}
+		v.Block.Func.RegArgs = nil
+		ssagen.CheckArgReg(v)
+
 	default:
 		if v.Type.IsMemory() {
 			return
@@ -320,7 +400,13 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		}
 		ssaGenValueOnStack(s, v, true)
 		if s.OnWasmStackSkipped != 0 {
-			panic("wasm: bad stack")
+			msg := "wasm: bad stack in " + v.Block.Func.Name + " at " + v.LongString() + ":"
+			for _, w := range v.Block.Values {
+				if w.OnWasmStack {
+					msg += " " + w.LongString()
+				}
+			}
+			panic(msg)
 		}
 		setReg(s, v.Reg())
 	}

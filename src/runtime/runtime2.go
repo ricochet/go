@@ -590,6 +590,10 @@ type g struct {
 	// determines how this corresponds to scan work debt.
 	gcAssistBytes int64
 
+	// coop is the WebAssembly Component Model thread state. It is empty
+	// except on wasip1 with GOEXPERIMENT=wasmcoopthreads.
+	coop gCoop
+
 	// valgrindStackID is used to track what memory is used for stacks when a program is
 	// built with the "valgrind" build tag, otherwise it is unused.
 	valgrindStackID uintptr

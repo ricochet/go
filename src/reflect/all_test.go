@@ -3540,7 +3540,7 @@ func TestAllocations(t *testing.T) {
 			panic("wrong result")
 		}
 	})
-	if runtime.GOOS != "js" && runtime.GOOS != "wasip1" {
+	if runtime.GOOS != "js" && runtime.GOOS != "wasip1" && runtime.GOOS != "wasip3" {
 		typ := TypeFor[struct{ f int }]()
 		noAlloc(t, 100, func(int) {
 			if typ.Field(0).Index[0] != 0 {
@@ -6981,7 +6981,7 @@ func TestTypeFieldOutOfRangePanic(t *testing.T) {
 }
 
 func TestTypeFieldReadOnly(t *testing.T) {
-	if runtime.GOOS == "js" || runtime.GOOS == "wasip1" {
+	if runtime.GOOS == "js" || runtime.GOOS == "wasip1" || runtime.GOOS == "wasip3" {
 		// This is OK because we don't use the optimization
 		// for js or wasip1.
 		t.Skip("test does not fault on GOOS=js")

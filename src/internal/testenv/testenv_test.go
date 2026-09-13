@@ -57,7 +57,7 @@ func TestGoToolLocation(t *testing.T) {
 func TestHasGoBuild(t *testing.T) {
 	if !testenv.HasGoBuild() {
 		switch runtime.GOOS {
-		case "js", "wasip1":
+		case "js", "wasip1", "wasip3":
 			// No exec syscall, so these shouldn't be able to 'go build'.
 			t.Logf("HasGoBuild is false on %s", runtime.GOOS)
 			return
@@ -148,7 +148,7 @@ func TestMustHaveExec(t *testing.T) {
 	})
 
 	switch runtime.GOOS {
-	case "js", "wasip1":
+	case "js", "wasip1", "wasip3":
 		if hasExec {
 			// js and wasip1 lack an “exec” syscall.
 			t.Errorf("expected MustHaveExec to skip on %v", runtime.GOOS)

@@ -18,7 +18,7 @@ var hasSymlink = sync.OnceValues(func() (ok bool, reason string) {
 	switch runtime.GOOS {
 	case "plan9":
 		return false, ""
-	case "android", "wasip1":
+	case "android", "wasip1", "wasip3":
 		// For wasip1, some runtimes forbid absolute symlinks,
 		// or symlinks that escape the current working directory.
 		// Perform a simple test to see whether the runtime

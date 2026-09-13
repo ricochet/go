@@ -414,11 +414,15 @@ func libinit(ctxt *Link) {
 	}
 
 	if *flagEntrySymbol == "" {
+		goos := buildcfg.GOOS
+		if goos == "wasip3" {
+			goos = "wasip1" // GOOS=wasip3 shares the GOOS=wasip1 runtime entry points
+		}
 		switch ctxt.BuildMode {
 		case BuildModeCShared, BuildModeCArchive:
-			*flagEntrySymbol = fmt.Sprintf("_rt0_%s_%s_lib", buildcfg.GOARCH, buildcfg.GOOS)
+			*flagEntrySymbol = fmt.Sprintf("_rt0_%s_%s_lib", buildcfg.GOARCH, goos)
 		case BuildModeExe, BuildModePIE:
-			*flagEntrySymbol = fmt.Sprintf("_rt0_%s_%s", buildcfg.GOARCH, buildcfg.GOOS)
+			*flagEntrySymbol = fmt.Sprintf("_rt0_%s_%s", buildcfg.GOARCH, goos)
 		case BuildModeShared, BuildModePlugin:
 			// No *flagEntrySymbol for -buildmode=shared and plugin
 		default:

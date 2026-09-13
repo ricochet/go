@@ -6,10 +6,16 @@
 
 // See memclrNoHeapPointers Go doc for important implementation constraints.
 
+#ifdef GOEXPERIMENT_regabiargs
+// func memclrNoHeapPointers(ptr unsafe.Pointer, n uintptr)
+// With GOEXPERIMENT=wasmregabi, the arguments are in R0 and R1.
+TEXT runtime·memclrNoHeapPointers<ABIInternal>(SB), NOSPLIT, $0-16
+#else
 // func memclrNoHeapPointers(ptr unsafe.Pointer, n uintptr)
 TEXT runtime·memclrNoHeapPointers(SB), NOSPLIT, $0-16
 	MOVD ptr+0(FP), R0
 	MOVD n+8(FP), R1
+#endif
 
 	Get R0
 	I32WrapI64

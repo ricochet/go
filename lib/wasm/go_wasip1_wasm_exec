@@ -14,6 +14,12 @@ case "$GOWASIRUNTIME" in
 		exec wazero run -mount /:/ -env-inherit -cachedir "${TMPDIR:-/tmp}"/wazero ${GOWASIRUNTIMEARGS:-} "$1" "${@:2}"
 		;;
 	"wasmtime" | "")
+		if [ -n "${GOWASICOMPONENTADAPTER:-}" ]; then
+			# GOEXPERIMENT=wasmcoopthreads binaries use Component Model
+			# thread built-ins, so they must run as components.
+			wasm-tools component new "$1" --adapt "wasi_snapshot_preview1=$GOWASICOMPONENTADAPTER" -o "$1.component.wasm" || exit 1
+			exec wasmtime run --dir=/ --env PWD="$PWD" --env PATH="$PATH" -W component-model-threading -W max-wasm-stack=8388608 -W async-stack-size=9437184 ${GOWASIRUNTIMEARGS:-} "$1.component.wasm" "${@:2}"
+		fi
 		exec wasmtime run --dir=/ --env PWD="$PWD" --env PATH="$PATH" -W max-wasm-stack=8388608 ${GOWASIRUNTIMEARGS:-} "$1" "${@:2}"
 		;;
 	*)

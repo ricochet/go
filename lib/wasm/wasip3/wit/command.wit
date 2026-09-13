@@ -1,0 +1,12 @@
+// The world that GOOS=wasip3 executables target. Wrapping a Go executable
+// module into a component (see ../go_wasip3_wasm_exec):
+//
+//	wasm-tools component embed $GOROOT/lib/wasm/wasip3/wit main.wasm -o main.embed.wasm
+//	wasm-tools component new main.embed.wasm -o main.component.wasm
+//
+// The WASI packages in deps are those of Wasmtime's WASI 0.3 implementation.
+package go:wasip3;
+
+world command {
+  include wasi:cli/command@0.3.0;
+}

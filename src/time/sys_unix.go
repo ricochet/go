@@ -19,7 +19,7 @@ func interrupt() {
 	// somewhat defeats the purpose of TestSleep but we are still better off
 	// validating that time elapses when the process calls time.Sleep than
 	// skipping the test altogether.
-	if runtime.GOOS != "wasip1" {
+	if runtime.GOOS != "wasip1" && runtime.GOOS != "wasip3" {
 		syscall.Kill(syscall.Getpid(), syscall.SIGCHLD)
 	}
 }

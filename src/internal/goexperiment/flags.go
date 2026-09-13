@@ -130,4 +130,30 @@ type Flags struct {
 
 	// GoListExportNewFormat enables the new format for go list -export.
 	GoListExportNewFormat bool
+
+	// WasmCoopThreads runs each goroutine on its own WebAssembly
+	// Component Model cooperative thread on GOOS=wasip1, switching
+	// goroutines with thread.suspend-then-resume instead of unwinding
+	// and rewinding a single wasm stack. The resulting module must be
+	// wrapped as a component and run on a host with Component Model
+	// threading enabled.
+	WasmCoopThreads bool
+
+	// WasmStackful, together with WasmCoopThreads, stops the wasm
+	// backend from making every function resumable: calls are no longer
+	// followed by resume points and unwind checks. Goroutine switches
+	// and panic recovery instead discard stale wasm frames by throwing a
+	// WebAssembly exception that the resumed frame catches.
+	WasmStackful bool
+
+	// WasmSPParam, together with WasmStackful, passes the Go stack
+	// pointer between Go functions as a wasm parameter and result
+	// instead of through the SP global, which is then only kept up to
+	// date where code that does not follow the Go ABI may read it.
+	WasmSPParam bool
+
+	// WasmRegABI, together with WasmSPParam, enables the register-based
+	// Go internal ABI on wasm: the first integer arguments and results
+	// are passed as wasm parameters and results.
+	WasmRegABI bool
 }

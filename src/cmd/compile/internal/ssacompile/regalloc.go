@@ -178,6 +178,10 @@ type regState struct {
 type regAllocState struct {
 	f *ssa.Func
 
+	// noWasmStack is set while allocating the inputs of a value whose
+	// inputs must not live on the wasm stack (GOEXPERIMENT=wasmregabi).
+	noWasmStack bool
+
 	sdom        ssa.SparseTree
 	registers   []ssabase.Register
 	numRegs     ssaop.Register
@@ -475,7 +479,10 @@ func (s *regAllocState) makeSpill(v *ssa.Value, b *ssa.Block) *ssa.Value {
 // undone until the caller allows it by clearing nospill. Returns a
 // *Value which is either v or a copy of v allocated to the chosen register.
 func (s *regAllocState) allocValToReg(v *ssa.Value, mask ssaop.RegMask, nospill bool, pos src.XPos) *ssa.Value {
-	if s.f.Config.Ctxt.Arch.Arch == sys.ArchWasm && v.Rematerializeable() {
+	// With GOEXPERIMENT=wasmregabi, the inputs of calls and results
+	// (s.noWasmStack) cannot live on the wasm stack.
+	wasmStack := s.f.Config.Ctxt.Arch.Arch == sys.ArchWasm && !s.noWasmStack
+	if wasmStack && v.Rematerializeable() {
 		c := v.CopyIntoWithXPos(s.curBlock, pos)
 		c.OnWasmStack = true
 		s.setOrig(c, v)
@@ -512,7 +519,7 @@ func (s *regAllocState) allocValToReg(v *ssa.Value, mask ssaop.RegMask, nospill 
 
 	var r ssaop.Register
 	// If nospill is set, the value is used immediately, so it can live on the WebAssembly stack.
-	onWasmStack := nospill && s.f.Config.Ctxt.Arch.Arch == sys.ArchWasm
+	onWasmStack := nospill && wasmStack
 	if !onWasmStack {
 		// Allocate a register.
 		r = s.allocReg(mask, v)
@@ -753,6 +760,15 @@ func (s *regAllocState) init(f *ssa.Func) {
 					// Value can not live on stack. Values are not allowed to be reordered, so clear candidate set.
 					canLiveOnStack.Clear()
 				}
+				// With GOEXPERIMENT=wasmregabi, arguments and results
+				// passed in registers must be in those registers. The
+				// other arguments of a call cannot live on the wasm stack
+				// either: they would be generated at the call, after the
+				// register arguments were moved into place, possibly
+				// overwriting their inputs.
+				if len(f.Config.IntParamRegs) != 0 && (ssaop.OpcodeTable[v.Op].Call || v.Op == ssaop.OpMakeResult) {
+					continue
+				}
 				for _, arg := range v.Args {
 					// Value can live on the stack if:
 					// - it is only used once
@@ -921,6 +937,17 @@ func (s *regAllocState) regspec(v *ssa.Value) ssaop.RegInfo {
 	}
 	if op == ssaop.OpMakeResult && s.f.OwnAux.RegCache != nil {
 		return *s.f.OwnAux.ResultReg(s.f.Config)
+	}
+	if op == ssaop.OpWasmLoweredGetClosurePtr && len(s.f.Config.IntParamRegs) != 0 {
+		// GOEXPERIMENT=wasmregabi: the closure pointer and the register
+		// arguments are both scheduled first in the entry block, in no
+		// particular order, so loading the closure pointer (a global)
+		// into an argument register could overwrite an argument.
+		m := ssaop.OpcodeTable[op].Reg.Outputs[0].Regs
+		for _, r := range s.f.Config.IntParamRegs {
+			m = m.RemoveReg(ssaop.Register(r))
+		}
+		return ssaop.RegInfo{Outputs: []ssaop.OutputInfo{{Regs: m}}}
 	}
 	return ssaop.OpcodeTable[op].Reg
 }
@@ -1401,6 +1428,9 @@ func (s *regAllocState) regalloc(f *ssa.Func) {
 		// Process all the non-phi values.
 		for idx, v := range oldSched {
 			s.curIdx = nphi + idx
+			// With GOEXPERIMENT=wasmregabi, the inputs of calls and
+			// results must be in registers; see allocValToReg.
+			s.noWasmStack = len(s.f.Config.IntParamRegs) != 0 && (ssaop.OpcodeTable[v.Op].Call || v.Op == ssaop.OpMakeResult)
 			tmpReg := noRegister
 			if s.f.Pass.Debug > ssa.RegDebug {
 				fmt.Printf("  processing %s\n", v.LongString())
@@ -1918,6 +1948,7 @@ func (s *regAllocState) regalloc(f *ssa.Func) {
 			b.Values = append(b.Values, v)
 			s.dropIfUnused(v)
 		}
+		s.noWasmStack = false
 
 		// Copy the control values - we need this so we can reduce the
 		// uses property of these values later.

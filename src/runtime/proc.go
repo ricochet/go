@@ -3578,7 +3578,7 @@ top:
 	// If a callback returned and no other goroutine is awake,
 	// then wake event handler goroutine which pauses execution
 	// until a callback was triggered.
-	gp, otherReady := beforeIdle(now, pollUntil)
+	gp, otherReady := beforeIdle(now, pollUntil, netpollinited() && netpollAnyWaiters())
 	if gp != nil {
 		trace := traceAcquire()
 		casgstatus(gp, _Gwaiting, _Grunnable)
@@ -5390,6 +5390,7 @@ func newproc1(fn *funcval, callergp *g, callerpc uintptr, parked bool, waitreaso
 	newg.sched.pc = abi.FuncPCABI0(goexit) + sys.PCQuantum // +PCQuantum so that previous instruction is in same function
 	newg.sched.g = guintptr(unsafe.Pointer(newg))
 	gostartcallfn(&newg.sched, fn)
+	coopNewproc(newg)
 	newg.parentGoid = callergp.goid
 	newg.gopc = callerpc
 	newg.ancestors = saveAncestors(callergp)

@@ -535,6 +535,20 @@ const (
 
 	ARETUNWIND
 
+	// ATryTable and AThrow are the exception handling instructions
+	// try_table and throw (GOEXPERIMENT=wasmstackful). They are encoded
+	// specially, not through the opcode ranges above.
+	// ATryTable $tag opens a try_table block with a single catch clause
+	// that branches to label 0 (the block enclosing the try_table).
+	// AThrow $tag throws tag, which takes no parameters.
+	ATryTable
+	AThrow
+
+	// ACALLRESULT is like ACALLNORESUME, but leaves the callee's i32
+	// result (1 if it is unwinding the wasm stack) on the wasm stack
+	// for the caller to inspect (GOEXPERIMENT=wasmstackful).
+	ACALLRESULT
+
 	AMOVB
 	AMOVH
 	AMOVW
@@ -631,6 +645,11 @@ const (
 	REG_V13
 	REG_V14
 	REG_V15
+
+	// i64 local holding a frame's distance from its goroutine's stack.hi
+	// (GOEXPERIMENT=wasmstackful). Stack copying preserves it, so it
+	// identifies a frame across stack moves.
+	REG_FDEPTH
 
 	REG_PC_B // also first parameter, i32
 
