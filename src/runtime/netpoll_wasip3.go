@@ -48,6 +48,7 @@ type p3Waiter struct {
 	when    int64 // for a timer subtask, when it completes (in nanotime)
 	timer   bool
 	notify  uint32 // for a task's notification future, the task id
+	allocs  uint64 // the bindings' allocation count when it joined (see wasip3PollAllocs)
 }
 
 // p3Op mirrors package net's p3Op.
@@ -73,6 +74,14 @@ var p3Poll struct {
 
 	// timers is the number of pending timer subtasks.
 	timers int32
+
+	// allocs is the address of the allocation counter of Component Model
+	// bindings, if they registered one (see wasip3PollAllocs).
+	allocs uintptr
+
+	// delivered is the smallest allocation count of the waiters whose events
+	// were delivered since no goroutine could last run, or ^uint64(0).
+	delivered uint64
 }
 
 func netpollinit() {}
@@ -135,6 +144,9 @@ func p3JoinSet(h, set uint32) *p3Waiter {
 		throw("runtime: waitable already has a waiter")
 	}
 	*w = p3Waiter{handle: h, set: set}
+	if p3Poll.allocs != 0 {
+		w.allocs = *(*uint64)(unsafe.Pointer(p3Poll.allocs))
+	}
 	p3WaitableJoin(h, set)
 	return w
 }
@@ -305,11 +317,13 @@ func p3Deliver(toRun *gList, code, h, payload uint32) int32 {
 		p3Poll.timers--
 		return 0
 	case w.gp != 0:
+		p3Poll.delivered = min(p3Poll.delivered, w.allocs)
 		w.event, w.payload = code, payload
 		toRun.push(w.gp.ptr())
 		w.gp = 0
 		return -1
 	}
+	p3Poll.delivered = min(p3Poll.delivered, w.allocs)
 	o := (*p3Op)(unsafe.Pointer(w.op))
 	o.event, o.payload, o.done = code, payload, 1
 	pd := (*pollDesc)(unsafe.Pointer(w.pd))
@@ -335,6 +349,37 @@ func wasip3Await(h uint32) (event, payload uint32) {
 //go:linkname wasip3AwaitCall
 func wasip3AwaitCall(status uint32) {
 	p3AwaitCall(status)
+}
+
+// wasip3PollAllocs registers the counter of the allocations that the
+// bindings' cabi_realloc makes, which must not move. Bindings whose
+// cabi_realloc allocates Go memory keep it alive until the values in it have
+// been lifted. The host allocates for an event's values between the start of
+// the wait for it and its delivery, and the goroutine that waited, or package
+// syscall, lifts them before it blocks again. So the bindings can release the
+// allocations made before the count that wasip3PollOldestAllocs reports.
+//
+//go:linkname wasip3PollAllocs
+func wasip3PollAllocs(counter *uint64) {
+	p3Poll.allocs = uintptr(unsafe.Pointer(counter))
+	p3Poll.delivered = ^uint64(0)
+}
+
+// wasip3PollOldestAllocs returns the smallest allocation count (see
+// wasip3PollAllocs) of the waits that are in progress, or whose events were
+// delivered since no goroutine could last run, or ^uint64(0) if there are
+// none.
+//
+//go:linkname wasip3PollOldestAllocs
+func wasip3PollOldestAllocs() uint64 {
+	oldest := p3Poll.delivered
+	for i := range p3Waiters() {
+		w := &p3Waiters()[i]
+		if w.handle != 0 && !w.timer && w.notify == 0 {
+			oldest = min(oldest, w.allocs)
+		}
+	}
+	return oldest
 }
 
 // wasip3PollNewSet returns a new waitable set, for a new task.

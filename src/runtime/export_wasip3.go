@@ -123,6 +123,8 @@ func wasip3AsyncExportCallback(set, event, handle, payload uint32) uint32 {
 // wasip3BeforeIdle returns the goroutine running a task, if any, when no
 // goroutine can run, to let it return to the host.
 func wasip3BeforeIdle() *g {
+	// Goroutines woken by events have run, and lifted their values.
+	p3Poll.delivered = ^uint64(0)
 	gp := p3IdleWaiter.ptr()
 	p3IdleWaiter = 0
 	return gp
